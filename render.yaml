@@ -1,0 +1,23 @@
+services:
+  # Django REST Backend Service
+  - type: web
+    name: janseva-ai-backend
+    env: python
+    buildCommand: pip install -r backend/requirements.txt && python backend/manage.py migrate
+    startCommand: cd backend && gunicorn config.wsgi:application --bind 0.0.0.0:$PORT
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+
+  # React Vite Frontend Service
+  - type: web
+    name: janseva-ai-frontend
+    env: static
+    buildCommand: cd frontend && npm install && npm run build
+    staticPublishPath: ./frontend/dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
