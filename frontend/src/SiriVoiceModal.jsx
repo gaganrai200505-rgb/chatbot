@@ -1,198 +1,126 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { sendChatMessage, fetchTextToSpeechAudio } from './api';
 
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Constants & helpers
+ * ───────────────────────────────────────────────────────────────────────────── */
+
 const LANG_LOCALE = { auto: 'en-IN', en: 'en-IN', hi: 'hi-IN', kn: 'kn-IN' };
 
-/** Detect mobile browsers (Android + iOS) — Web Speech API is unreliable on mobile after async ops */
-const isMobileBrowser = () => {
-  if (typeof navigator === 'undefined') return false;
-  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-};
-
-/** Helper to find the best Realistic Gemini / Siri / Natural Neural voice for TTS */
-const getRealisticVoice = (langCode) => {
-  if (!window.speechSynthesis) return null;
-  const voices = window.speechSynthesis.getVoices();
-  if (!voices || voices.length === 0) return null;
-
-  const targetPrefix = (LANG_LOCALE[langCode] || 'en-IN').split('-')[0].toLowerCase();
-
-  // Priority ranking for realistic Male Neural voices (ChatGPT Onyx / Cove style)
-  const preferredKeywords = [
-    'microsoft christopher online (natural)',
-    'microsoft guy online (natural)',
-    'microsoft prabhat',
-    'microsoft madhur',
-    'microsoft gagan',
-    'google us english male',
-    'google uk english male',
-    'rishi',
-    'george',
-    'alex',
-    'guy',
-    'male',
-    'natural'
-  ];
-
-  // 1. Search for realistic neural voices matching locale
-  for (const kw of preferredKeywords) {
-    const match = voices.find(
-      (v) => v.name.toLowerCase().includes(kw) && (v.lang.toLowerCase().includes(targetPrefix) || targetPrefix === 'en')
-    );
-    if (match) return match;
-  }
-
-  // 2. Filter by language prefix
-  const langVoices = voices.filter((v) => v.lang.toLowerCase().startsWith(targetPrefix));
-  
-  // Prefer Google/Online high quality voices
-  const googleVoice = langVoices.find((v) => v.name.toLowerCase().includes('google') || v.name.toLowerCase().includes('online'));
-  if (googleVoice) return googleVoice;
-
-  return langVoices[0] || voices.find((v) => v.lang.startsWith('en')) || voices[0] || null;
-};
-
-const SendIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
-    stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <line x1="22" y1="2" x2="11" y2="13"/>
-    <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-  </svg>
-);
-
-const CloseIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
-    stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-    <line x1="18" y1="6" x2="6" y2="18"/>
-    <line x1="6" y1="6" x2="18" y2="18"/>
-  </svg>
-);
+const isMobileBrowser = () =>
+  /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+    typeof navigator !== 'undefined' ? navigator.userAgent : ''
+  );
 
 const sanitizeForSpeech = (text, lang) => {
   if (!text) return '';
-  let clean = text;
-
-  // Remove URLs, Markdown formatting, headers, table pipes
-  clean = clean.replace(/https?:\/\/\S+/g, '');
-  clean = clean.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-  clean = clean.replace(/\|/g, ' ');
-  clean = clean.replace(/#{1,6}\s?/g, '');
-  clean = clean.replace(/[*_~`]/g, '');
-
-  // Normalize symbols to natural spoken words per language
+  let c = text
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/\|/g, ' ')
+    .replace(/#{1,6}\s?/g, '')
+    .replace(/[*_~`]/g, '');
   if (lang === 'kn') {
-    clean = clean.replace(/₹\s*([\d,]+)/g, '$1 ರೂಪಾಯಿ');
-    clean = clean.replace(/Rs\.?\s*([\d,]+)/gi, '$1 ರೂಪಾಯಿ');
-    clean = clean.replace(/INR\s*([\d,]+)/gi, '$1 ರೂಪಾಯಿ');
-    clean = clean.replace(/%/g, ' ಶೇಕಡಾ');
-    clean = clean.replace(/(\d+)\s*-\s*(\d+)/g, '$1 ರಿಂದ $2');
+    c = c.replace(/₹\s*([\d,]+)/g, '$1 ರೂಪಾಯಿ').replace(/%/g, ' ಶೇಕಡಾ');
   } else if (lang === 'hi') {
-    clean = clean.replace(/₹\s*([\d,]+)/g, '$1 रुपये');
-    clean = clean.replace(/Rs\.?\s*([\d,]+)/gi, '$1 रुपये');
-    clean = clean.replace(/INR\s*([\d,]+)/gi, '$1 रुपये');
-    clean = clean.replace(/%/g, ' प्रतिशत');
-    clean = clean.replace(/(\d+)\s*-\s*(\d+)/g, '$1 से $2');
+    c = c.replace(/₹\s*([\d,]+)/g, '$1 रुपये').replace(/%/g, ' प्रतिशत');
   } else {
-    clean = clean.replace(/₹\s*([\d,]+)/g, '$1 Rupees');
-    clean = clean.replace(/Rs\.?\s*([\d,]+)/gi, '$1 Rupees');
-    clean = clean.replace(/%/g, ' percent');
-    clean = clean.replace(/(\d+)\s*-\s*(\d+)/g, '$1 to $2');
+    c = c.replace(/₹\s*([\d,]+)/g, '$1 Rupees').replace(/%/g, ' percent');
   }
-
-  return clean.replace(/\s+/g, ' ').trim();
+  return c.replace(/\s+/g, ' ').trim();
 };
 
-/** Helper to detect if a mic transcript is feedback/echo from the AI's own audio speaker output */
+/** True if mic transcript is likely speaker echo of the AI's own voice */
 const isSpeakerEcho = (transcript, aiText) => {
   if (!transcript || !aiText) return false;
-  const cleanT = transcript.toLowerCase().replace(/[^\w\s]/g, '').trim();
-  const cleanAI = aiText.toLowerCase().replace(/[^\w\s]/g, '').trim();
-  if (!cleanT || !cleanAI) return false;
-
-  // 1. Direct substring match (mic transcript is contained within AI spoken response)
-  if (cleanAI.includes(cleanT)) return true;
-
-  // 2. Word-overlap ratio (if > 40% of words match AI text, it's AI speaker echo)
-  const tWords = cleanT.split(/\s+/).filter((w) => w.length > 2);
-  if (tWords.length === 0) return false;
-
-  let matchCount = 0;
-  for (const word of tWords) {
-    if (cleanAI.includes(word)) {
-      matchCount++;
-    }
-  }
-
-  return (matchCount / tWords.length) >= 0.40;
+  const t = transcript.toLowerCase().replace(/[^\w\s]/g, '').trim();
+  const a = aiText.toLowerCase().replace(/[^\w\s]/g, '').trim();
+  if (!t || !a) return false;
+  if (a.includes(t)) return true;
+  const words = t.split(/\s+/).filter(w => w.length > 2);
+  if (!words.length) return false;
+  return words.filter(w => a.includes(w)).length / words.length >= 0.4;
 };
 
-const SiriVoiceModal = ({ isOpen, onClose, language = 'en', selectedState = '', activeSessionId = '', onSessionStarted, onMessageSent }) => {
-  // Mode: 'listening' | 'thinking' | 'speaking' | 'idle'
-  const [mode, setMode] = useState('idle');
-  const [userTranscript, setUserTranscript] = useState('');
-  const [manualInput, setManualInput] = useState('');
-  const [aiResponseText, setAiResponseText] = useState('');
-  const [micPermissionError, setMicPermissionError] = useState(null);
+const getRealisticVoice = (langCode) => {
+  if (!window.speechSynthesis) return null;
+  const voices = window.speechSynthesis.getVoices();
+  if (!voices.length) return null;
+  const prefix = (LANG_LOCALE[langCode] || 'en-IN').split('-')[0].toLowerCase();
+  const kws = ['microsoft christopher online (natural)', 'microsoft guy online (natural)',
+    'microsoft prabhat', 'microsoft madhur', 'google us english male',
+    'google uk english male', 'rishi', 'george', 'alex', 'natural'];
+  for (const kw of kws) {
+    const m = voices.find(v => v.name.toLowerCase().includes(kw) &&
+      (v.lang.toLowerCase().startsWith(prefix) || prefix === 'en'));
+    if (m) return m;
+  }
+  const lang = voices.filter(v => v.lang.toLowerCase().startsWith(prefix));
+  return lang.find(v => v.name.toLowerCase().includes('google')) || lang[0] ||
+    voices.find(v => v.lang.startsWith('en')) || voices[0] || null;
+};
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Micro icon components
+ * ───────────────────────────────────────────────────────────────────────────── */
+const SendIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+  </svg>
+);
+const CloseIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+  </svg>
+);
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * SiriVoiceModal — Claude-style always-on 2-way voice agent
+ *
+ * Conversation loop:
+ *   LISTENING → user speaks → THINKING (AI API) → SPEAKING (TTS) → LISTENING
+ *
+ * On mobile: recognition is paused during TTS (hardware mic/speaker conflict).
+ *            Recognition resumes 500ms after audio ends.
+ * On desktop: recognition runs continuously even during WebSpeech TTS.
+ * ───────────────────────────────────────────────────────────────────────────── */
+const SiriVoiceModal = ({
+  isOpen, onClose, language = 'en',
+  selectedState = '', activeSessionId = '',
+  onSessionStarted, onMessageSent
+}) => {
+  /* UI state */
+  const [mode, setMode] = useState('idle');       // 'idle'|'listening'|'thinking'|'speaking'
+  const [userText, setUserText] = useState('');   // what user said (interim + final)
+  const [aiText, setAiText] = useState('');       // AI response text displayed
+  const [inputText, setInputText] = useState(''); // typed fallback input
+  const [permError, setPermError] = useState(null);
   const isMobile = isMobileBrowser();
 
-  const recognitionRef = useRef(null);
-  const currentSessionIdRef = useRef(activeSessionId);
-  const silenceTimerRef = useRef(null);
-  const transcriptBoxRef = useRef(null);
-  // Pre-created Audio element — kept alive so mobile browsers allow .play() after async ops
-  const persistentAudioRef = useRef(new Audio());
-  // Track if audio context has been unlocked by a user gesture
-  const audioUnlockedRef = useRef(false);
-
-  useEffect(() => {
-    currentSessionIdRef.current = activeSessionId;
-  }, [activeSessionId]);
-
-  // Pre-warm WebSpeech Voices on mount
-  useEffect(() => {
-    if (window.speechSynthesis) {
-      window.speechSynthesis.getVoices();
-      window.speechSynthesis.onvoiceschanged = () => {
-        window.speechSynthesis.getVoices();
-      };
-    }
-  }, []);
-
-  // Auto-scroll transcript box when messages update
-  useEffect(() => {
-    if (transcriptBoxRef.current) {
-      transcriptBoxRef.current.scrollTop = transcriptBoxRef.current.scrollHeight;
-    }
-  }, [userTranscript, aiResponseText, mode]);
-
-  // ESC key to close modal
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (e.key === 'Escape' && isOpen) {
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
-
-  const audioRef = useRef(null);
-  const isQueryExecutingRef = useRef(false);
-  const isThinkingRef = useRef(false);
+  /* Refs — all mutable state that must NOT trigger re-renders */
+  const recRef = useRef(null);             // SpeechRecognition instance
+  const audioRef = useRef(new Audio());    // persistent Audio element (mobile TTS)
+  const sessionIdRef = useRef(activeSessionId);
+  const silenceTimer = useRef(null);
+  const restartTimer = useRef(null);
+  const isBusy = useRef(false);           // true while thinking OR speaking
+  const isPlayingAudio = useRef(false);   // true while TTS audio is playing
+  const aiTextRef = useRef('');           // mirror of aiText for echo detection in callbacks
   const isOpenRef = useRef(isOpen);
-  const startRecognitionRef = useRef(null);
 
-  useEffect(() => {
-    isOpenRef.current = isOpen;
-  }, [isOpen]);
+  useEffect(() => { sessionIdRef.current = activeSessionId; }, [activeSessionId]);
+  useEffect(() => { isOpenRef.current = isOpen; }, [isOpen]);
+  useEffect(() => { aiTextRef.current = aiText; }, [aiText]);
 
-  // Unlock audio on first user interaction (required for iOS Safari autoplay)
+  /* ── Audio unlock (iOS Safari requires user gesture before first play) ── */
   useEffect(() => {
+    let unlocked = false;
     const unlock = () => {
-      if (audioUnlockedRef.current) return;
-      audioUnlockedRef.current = true;
-      const a = persistentAudioRef.current;
-      // Play a 0-length silent buffer to "unlock" audio on iOS
+      if (unlocked) return;
+      unlocked = true;
+      const a = audioRef.current;
       a.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
       a.volume = 0;
       a.play().catch(() => {});
@@ -205,426 +133,378 @@ const SiriVoiceModal = ({ isOpen, onClose, language = 'en', selectedState = '', 
     };
   }, []);
 
-  // Stop all active audio streams (both HTML5 Audio and WebSpeech API)
-  const stopAllPlayback = useCallback(() => {
-    const a = persistentAudioRef.current;
-    try {
-      a.pause();
-      a.src = '';
-    } catch (e) {}
-    audioRef.current = null;
+  /* ── Pre-warm WebSpeech voices on desktop ── */
+  useEffect(() => {
     if (window.speechSynthesis) {
-      try { window.speechSynthesis.cancel(); } catch (e) {}
+      window.speechSynthesis.getVoices();
+      window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
     }
   }, []);
 
-  const fallbackWebSpeech = useCallback((cleanText) => {
-    stopAllPlayback();
-    if (!isOpenRef.current || !window.speechSynthesis) {
-      setMode('listening');
-      isThinkingRef.current = false;
-      isQueryExecutingRef.current = false;
-      return;
+  /* ─────────────────────────────────────────────────────────────────────────
+   * stopAudio — immediately cuts all TTS output
+   * ───────────────────────────────────────────────────────────────────────── */
+  const stopAudio = useCallback(() => {
+    isPlayingAudio.current = false;
+    const a = audioRef.current;
+    try { a.pause(); a.src = ''; } catch (_) {}
+    a.onplay = null; a.onended = null; a.onerror = null;
+    if (window.speechSynthesis) {
+      try { window.speechSynthesis.cancel(); } catch (_) {}
     }
-    setMode('speaking');
+  }, []);
 
-    const utterance = new SpeechSynthesisUtterance(cleanText);
-    const chosenVoice = getRealisticVoice(language);
-    if (chosenVoice) utterance.voice = chosenVoice;
-    utterance.lang = LANG_LOCALE[language] || 'en-IN';
-    utterance.rate = 0.97;
-    utterance.pitch = 1.05;
+  /* ─────────────────────────────────────────────────────────────────────────
+   * stopRecognition — abort any active recognition
+   * ───────────────────────────────────────────────────────────────────────── */
+  const stopRecognition = useCallback(() => {
+    if (silenceTimer.current) { clearTimeout(silenceTimer.current); silenceTimer.current = null; }
+    if (restartTimer.current) { clearTimeout(restartTimer.current); restartTimer.current = null; }
+    if (recRef.current) {
+      try { recRef.current.abort(); } catch (_) {}
+      recRef.current = null;
+    }
+  }, []);
 
-    utterance.onstart = () => {
-      // ACTIVE BARGE-IN: Start mic listening as soon as fallback speech begins!
-      isThinkingRef.current = false;
-      if (isOpenRef.current) {
-        startRecognitionRef.current?.();
-      }
-    };
+  /* ─────────────────────────────────────────────────────────────────────────
+   * handleQuery — send user question to AI, play TTS response, loop back
+   * ───────────────────────────────────────────────────────────────────────── */
+  const startListening = useCallback(() => {}, []); // forward ref — defined below
 
-    utterance.onend = () => {
-      stopAllPlayback();
-      isThinkingRef.current = false;
-      isQueryExecutingRef.current = false;
-      setUserTranscript('');
-      setManualInput('');
-      setMode('listening');
-      startRecognitionRef.current?.();
-    };
+  const handleQuery = useCallback(async (question) => {
+    const q = question.trim();
+    if (!q || q.length < 2 || isBusy.current) return;
 
-    utterance.onerror = () => {
-      stopAllPlayback();
-      isThinkingRef.current = false;
-      isQueryExecutingRef.current = false;
-      setUserTranscript('');
-      setManualInput('');
-      setMode('listening');
-      startRecognitionRef.current?.();
-    };
-
-    window.speechSynthesis.speak(utterance);
-  }, [language, stopAllPlayback]);
-
-  /** Play audio blob URL using the persistent Audio element (survives mobile autoplay restrictions) */
-  const playAudioUrl = useCallback(async (audioUrl, cleanTextForFallback) => {
-    const audio = persistentAudioRef.current;
-    audioRef.current = audio;
-
-    audio.src = audioUrl;
-    audio.volume = 1;
-
-    // On mobile: DON'T start recognition during playback.
-    // Android/iOS cannot record mic and play speaker audio simultaneously.
-    // Starting recognition here causes instant 'audio-capture' errors that
-    // throttle Chrome's recognition API permanently.
-    audio.onplay = () => {
-      isThinkingRef.current = true; // keep locked while speaking
-    };
-
-    const onAudioDone = () => {
-      URL.revokeObjectURL(audioUrl);
-      audioRef.current = null;
-      isThinkingRef.current = false;
-      isQueryExecutingRef.current = false;
-      setUserTranscript('');
-      setManualInput('');
-      setMode('listening');
-      // 500ms delay: gives Android audio system time to switch from
-      // playback mode back to capture mode before mic opens
-      setTimeout(() => {
-        if (isOpenRef.current && !isThinkingRef.current) {
-          startRecognitionRef.current?.();
-        }
-      }, 500);
-    };
-
-    audio.onended = onAudioDone;
-    audio.onerror = onAudioDone;
+    isBusy.current = true;
+    stopRecognition();
+    stopAudio();
+    setUserText(q);
+    setInputText('');
+    setMode('thinking');
+    setAiText('Just a sec…');
 
     try {
-      await audio.play();
-    } catch (e) {
-      console.warn('[TTS] audio.play() was blocked:', e.message);
-      onAudioDone();
-      // Also try web speech as final fallback
-      if (cleanTextForFallback) fallbackWebSpeech(cleanTextForFallback);
-    }
-  }, [fallbackWebSpeech]);
+      const result = await sendChatMessage(
+        q, language, sessionIdRef.current || '', selectedState, true
+      );
 
-  // High-Quality Neural TTS:
-  //  - Mobile: backend edge-tts (neural, multilingual) via persistent Audio element
-  //  - Desktop: browser WebSpeech API (instant, no latency)
-  const speakSiriResponse = useCallback(async (text) => {
-    const cleanText = sanitizeForSpeech(text, language);
-    if (!cleanText || !isOpenRef.current) {
-      setMode('listening');
-      isThinkingRef.current = false;
-      isQueryExecutingRef.current = false;
-      setTimeout(() => { if (isOpenRef.current) startRecognitionRef.current?.(); }, 350);
-      return;
-    }
+      if (!sessionIdRef.current && result.session_id) {
+        sessionIdRef.current = result.session_id;
+        onSessionStarted?.(result.session_id);
+      }
+      onMessageSent?.();
 
-    stopAllPlayback();
+      const response = result.response || "I couldn't find information on that scheme.";
+      setAiText(response);
+      aiTextRef.current = response;
+
+      if (!isOpenRef.current) { isBusy.current = false; return; }
+
+      /* ── Speak the response ── */
+      await speakResponse(response);
+
+    } catch (err) {
+      const msg = err.message || 'Server connection failed.';
+      setAiText(msg);
+      aiTextRef.current = msg;
+      await speakResponse(msg);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [language, selectedState, stopAudio, stopRecognition]);
+
+  /* ─────────────────────────────────────────────────────────────────────────
+   * speakResponse — TTS then auto-resume listening
+   * Mobile: backend edge-tts via persistent Audio element
+   * Desktop: browser WebSpeech API
+   * ───────────────────────────────────────────────────────────────────────── */
+  const speakResponse = useCallback(async (text) => {
+    if (!isOpenRef.current) { isBusy.current = false; return; }
+
+    const clean = sanitizeForSpeech(text, language);
     setMode('speaking');
-    // Keep isThinkingRef=true throughout entire TTS cycle.
-    // This prevents recognition.onend from restarting the mic prematurely
-    // while we are fetching or playing TTS audio.
-    isThinkingRef.current = true;
+    isPlayingAudio.current = true;
 
-    if (isMobile) {
-      // ── MOBILE PATH: Use backend neural TTS (edge-tts) ──
-      try {
-        const audioUrl = await fetchTextToSpeechAudio(cleanText, language, 12000);
-        if (!isOpenRef.current) {
-          if (audioUrl) URL.revokeObjectURL(audioUrl);
-          stopAllPlayback();
-          isThinkingRef.current = false;
-          isQueryExecutingRef.current = false;
-          return;
+    const resumeListening = () => {
+      if (!isOpenRef.current) return;
+      isBusy.current = false;
+      isPlayingAudio.current = false;
+      setMode('listening');
+      setUserText('');
+      // Give audio hardware time to switch from playback to capture on mobile
+      const delay = isMobile ? 500 : 100;
+      restartTimer.current = setTimeout(() => {
+        if (isOpenRef.current && !isBusy.current) {
+          startListeningRef.current?.();
         }
-        if (audioUrl) {
-          await playAudioUrl(audioUrl, cleanText);
-          return;
+      }, delay);
+    };
+
+    /* ── MOBILE: backend neural TTS ── */
+    if (isMobile) {
+      if (!clean) { resumeListening(); return; }
+      try {
+        const url = await fetchTextToSpeechAudio(clean, language, 15000);
+        if (!isOpenRef.current) { if (url) URL.revokeObjectURL(url); isBusy.current = false; return; }
+        if (url) {
+          const a = audioRef.current;
+          a.src = url;
+          a.volume = 1;
+          a.onended = () => { URL.revokeObjectURL(url); resumeListening(); };
+          a.onerror = () => { URL.revokeObjectURL(url); resumeListening(); };
+          a.onplay = null;
+          try {
+            await a.play();
+            return;
+          } catch (e) {
+            console.warn('[TTS] play() blocked:', e.message);
+            URL.revokeObjectURL(url);
+          }
         }
       } catch (e) {
-        console.warn('[TTS Mobile] Backend TTS failed:', e.message);
+        console.warn('[TTS Mobile] failed:', e.message);
       }
-      // Mobile fallback — WebSpeech (may be silently blocked but we try)
-      isThinkingRef.current = false;
-      isQueryExecutingRef.current = false;
-      fallbackWebSpeech(cleanText);
+      // Mobile fallback: WebSpeech (may be silent but at least resumes listening)
+      if (!clean || !window.speechSynthesis) { resumeListening(); return; }
+      const u = new SpeechSynthesisUtterance(clean);
+      u.lang = LANG_LOCALE[language] || 'en-IN';
+      const v = getRealisticVoice(language);
+      if (v) u.voice = v;
+      u.onend = resumeListening;
+      u.onerror = resumeListening;
+      window.speechSynthesis.speak(u);
       return;
     }
 
-    // ── DESKTOP PATH: Instant browser WebSpeech API (< 100ms latency) ──
-    if (window.speechSynthesis) {
-      isThinkingRef.current = false; // desktop WebSpeech is synchronous, safe to release
-      isQueryExecutingRef.current = false;
-      fallbackWebSpeech(cleanText);
-      return;
-    }
+    /* ── DESKTOP: WebSpeech API ── */
+    if (!clean || !window.speechSynthesis) { resumeListening(); return; }
+    const u = new SpeechSynthesisUtterance(clean);
+    u.lang = LANG_LOCALE[language] || 'en-IN';
+    u.rate = 0.97; u.pitch = 1.05;
+    const v = getRealisticVoice(language);
+    if (v) u.voice = v;
 
-    // Desktop fallback: backend TTS
-    try {
-      const audioUrl = await fetchTextToSpeechAudio(cleanText, language, 1800);
-      if (!isOpenRef.current) {
-        if (audioUrl) URL.revokeObjectURL(audioUrl);
-        stopAllPlayback();
-        isThinkingRef.current = false;
-        isQueryExecutingRef.current = false;
-        return;
-      }
-      if (audioUrl) {
-        await playAudioUrl(audioUrl, cleanText);
-        return;
-      }
-    } catch (e) {
-      console.warn('[TTS Desktop] Backend TTS failed:', e.message);
-    }
+    // On desktop, recognition can run alongside WebSpeech (echo cancellation handles it)
+    u.onstart = () => {
+      if (isOpenRef.current && !isMobile) startListeningRef.current?.();
+    };
+    u.onend = resumeListening;
+    u.onerror = resumeListening;
+    window.speechSynthesis.speak(u);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [language, isMobile]);
 
-    isThinkingRef.current = false;
-    isQueryExecutingRef.current = false;
-    setMode('listening');
-    setTimeout(() => { if (isOpenRef.current) startRecognitionRef.current?.(); }, 350);
-  }, [language, isMobile, stopAllPlayback, fallbackWebSpeech, playAudioUrl]);
-
-  // Send User Query to Backend AI (Protected against duplicate concurrent execution)
-  const handleUserQuery = useCallback(async (spokenQuery) => {
-    const textToSend = (spokenQuery || manualInput || userTranscript).trim();
-    if (!textToSend || textToSend.length < 2) return;
-
-    // Lock execution synchronously — reject concurrent duplicate triggers
-    if (isQueryExecutingRef.current) {
-      console.log("[Voice] Skipping duplicate query trigger while query in progress.");
-      return;
-    }
-    isQueryExecutingRef.current = true;
-    isThinkingRef.current = true;
-
-    // Stop recognition & existing audio immediately
-    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    if (recognitionRef.current) {
-      try { recognitionRef.current.abort(); } catch (e) {}
-    }
-    stopAllPlayback();
-
-    setUserTranscript(textToSend);
-    setManualInput('');
-    setMode('thinking');
-    setAiResponseText('Just a sec...');
-
-    try {
-      const activeId = currentSessionIdRef.current || '';
-      const result = await sendChatMessage(textToSend, language, activeId, selectedState, true);
-
-      if (!currentSessionIdRef.current && result.session_id) {
-        currentSessionIdRef.current = result.session_id;
-        if (onSessionStarted) onSessionStarted(result.session_id);
-      }
-
-      if (onMessageSent) onMessageSent();
-
-      const responseText = result.response || "I couldn't find a matching scheme response.";
-      setAiResponseText(responseText);
-
-      // NOTE: Do NOT reset isThinkingRef/isQueryExecutingRef here.
-      // speakSiriResponse manages these flags throughout the TTS cycle.
-      // Resetting here would cause recognition to restart during TTS fetch,
-      // causing audio-capture conflicts on mobile.
-      speakSiriResponse(responseText);
-    } catch (err) {
-      console.error("[Voice API Error]:", err);
-      const errText = err.message || "Failed to connect to the server. Please check backend connection.";
-      setAiResponseText(errText);
-      speakSiriResponse(errText);
-    }
-  }, [manualInput, userTranscript, language, selectedState, onSessionStarted, onMessageSent, speakSiriResponse, stopAllPlayback]);
-
-  // Start Speech Recognition cleanly with adaptive silence grasping
-  const startRecognition = useCallback(() => {
-    if (!isOpenRef.current) return;
+  /* ─────────────────────────────────────────────────────────────────────────
+   * startListening — create & start a continuous SpeechRecognition session
+   *
+   * continuous = true  → browser keeps session alive; no repeated start/stop loops
+   * interimResults = true → see user's words in real-time
+   *
+   * Auto-restarts on unexpected onend (60-second Chrome timeout, network drop)
+   * ───────────────────────────────────────────────────────────────────────── */
+  const startListeningFn = useCallback(() => {
+    if (!isOpenRef.current || isBusy.current || isPlayingAudio.current) return;
 
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
-      setMicPermissionError("Speech recognition is not supported in this browser. You can type below.");
+      setPermError('Speech recognition is not supported in this browser. Please type your question below.');
       return;
     }
 
-    try {
-      if (recognitionRef.current) {
-        try { recognitionRef.current.abort(); } catch (e) {}
-        recognitionRef.current = null;
-      }
-
-      const recognition = new SR();
-      recognition.lang = LANG_LOCALE[language] || 'en-US';
-      recognition.interimResults = true;
-      recognition.continuous = false;
-
-      recognition.onstart = () => {
-        setMicPermissionError(null);
-      };
-
-      recognition.onresult = (e) => {
-        let fullTranscript = '';
-        let hasFinalResult = false;
-
-        for (let i = 0; i < e.results.length; ++i) {
-          fullTranscript += e.results[i][0].transcript + ' ';
-          if (e.results[i].isFinal) {
-            hasFinalResult = true;
-          }
-        }
-
-        const cleanTranscript = fullTranscript.trim();
-
-        if (cleanTranscript) {
-          const isAudioPlaying = (audioRef.current && !audioRef.current.paused) || (window.speechSynthesis && window.speechSynthesis.speaking);
-
-          // ACOUSTIC ECHO SUPPRESSION: Ignore mic input if it's the AI's own speaker output!
-          if (isAudioPlaying && isSpeakerEcho(cleanTranscript, aiResponseText)) {
-            console.log("[Voice] Filtered out AI speaker echo from microphone input.");
-            return;
-          }
-
-          // Genuine User Barge-In Interruption! Cut assistant audio immediately!
-          if (isAudioPlaying) {
-            console.log("[Voice Barge-In] User interrupted assistant speech! Cutting audio playback immediately.");
-            stopAllPlayback();
-            isQueryExecutingRef.current = false;
-            setMode('listening');
-          }
-
-          setUserTranscript(cleanTranscript);
-          setManualInput(cleanTranscript);
-
-          if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-
-          // Dynamic silence window: 200ms on final result, 450ms for interim
-          const silenceDelay = hasFinalResult ? 200 : (cleanTranscript.length < 15 ? 550 : 450);
-
-          silenceTimerRef.current = setTimeout(() => {
-            try { recognition.stop(); } catch (err) {}
-            handleUserQuery(cleanTranscript);
-          }, silenceDelay);
-        }
-      };
-
-      recognition.onerror = (e) => {
-        console.warn("[Voice] Speech recognition error:", e.error);
-        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-          setMicPermissionError("Microphone access is blocked. Click the lock 🔒 icon in your browser address bar to allow microphone access.");
-        } else if (e.error === 'audio-capture') {
-          // audio-capture on mobile usually means mic is locked by audio playback.
-          // Don't show a scary error — just wait and retry after delay.
-          console.warn('[Voice] audio-capture: mic busy with speaker. Will retry after delay.');
-        } else if (e.error === 'no-speech') {
-          // Normal silence — will auto-restart in onend
-        } else if (e.error === 'network') {
-          console.warn("[Voice] Network hiccup with speech recognition service.");
-        }
-      };
-
-      recognition.onend = () => {
-        recognitionRef.current = null;
-        // Only restart if:
-        // 1. Modal is still open
-        // 2. We're not processing a query or fetching/playing TTS (isThinkingRef covers both)
-        // 3. Use 350ms delay to avoid Chrome mobile throttling rapid restarts
-        if (isOpenRef.current && !isThinkingRef.current && !isQueryExecutingRef.current) {
-          setTimeout(() => {
-            if (isOpenRef.current && !isThinkingRef.current && !isQueryExecutingRef.current) {
-              startRecognitionRef.current?.();
-            }
-          }, 350);
-        }
-      };
-
-      recognitionRef.current = recognition;
-      recognition.start();
-    } catch (err) {
-      console.warn("SpeechRecognition start exception:", err);
+    // Clean up previous instance
+    if (recRef.current) {
+      try { recRef.current.abort(); } catch (_) {}
+      recRef.current = null;
     }
-  }, [language, stopAllPlayback, handleUserQuery, aiResponseText]);
 
-  useEffect(() => {
-    startRecognitionRef.current = startRecognition;
-  }, [startRecognition]);
+    const rec = new SR();
+    rec.continuous = true;        // ← key for Claude-style always-on listening
+    rec.interimResults = true;    // ← real-time transcript display
+    rec.lang = LANG_LOCALE[language] || 'en-IN';
 
-  // Open / Close Lifecycle with explicit microphone permission request
-  useEffect(() => {
-    if (isOpen) {
-      setUserTranscript('');
-      setManualInput('');
-      setAiResponseText('Hey there! I\'m listening — go ahead and ask me about any government scheme.');
+    rec.onstart = () => {
+      setPermError(null);
       setMode('listening');
-      setMicPermissionError(null);
+    };
 
-      // Request browser microphone hardware permission explicitly
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        navigator.mediaDevices.getUserMedia({ audio: true })
-          .then((stream) => {
-            stream.getTracks().forEach((t) => t.stop());
-            setMicPermissionError(null);
-            startRecognition();
-          })
-          .catch((err) => {
-            console.warn("getUserMedia permission error:", err);
-            setMicPermissionError("Microphone access is blocked or no microphone hardware was detected. Please click the lock 🔒 icon in your browser address bar to allow microphone access.");
-          });
+    rec.onresult = (e) => {
+      if (isBusy.current) return; // processing or speaking — ignore input
+
+      let interim = '', final = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) final += t;
+        else interim += t;
+      }
+
+      const spoken = (final || interim).trim();
+      if (!spoken) return;
+
+      // ── Barge-in: user speaks while AI is talking ──
+      if (isPlayingAudio.current || window.speechSynthesis?.speaking) {
+        // If it's echo of what AI just said, ignore
+        if (isSpeakerEcho(spoken, aiTextRef.current)) return;
+        // Genuine barge-in → cut AI speech immediately
+        stopAudio();
+        isPlayingAudio.current = false;
+        isBusy.current = false;
+      }
+
+      // Show live transcript
+      setUserText(spoken);
+
+      // Reset silence timer on every result
+      if (silenceTimer.current) clearTimeout(silenceTimer.current);
+
+      // Fire query after silence: 500ms after final result, 900ms after interim
+      const delay = final ? 500 : 900;
+      silenceTimer.current = setTimeout(() => {
+        if (!isBusy.current && spoken.length >= 2) {
+          handleQuery(spoken);
+        }
+      }, delay);
+    };
+
+    rec.onerror = (e) => {
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        setPermError('Microphone access is blocked. Tap the lock 🔒 in your browser bar to allow it.');
+      } else if (e.error === 'audio-capture') {
+        // Mic busy (e.g. just after speaker audio) — will retry in onend
+        console.warn('[Voice] audio-capture: mic busy, will retry');
+      } else if (e.error === 'aborted') {
+        // Normal — we called abort() ourselves
+      } else if (e.error === 'no-speech') {
+        // Fine — silence, auto-continues
       } else {
-        startRecognition();
+        console.warn('[Voice] recognition error:', e.error);
       }
-    } else {
-      stopAllPlayback();
-      isQueryExecutingRef.current = false;
-      isThinkingRef.current = false;
-      if (recognitionRef.current) {
-        try { recognitionRef.current.abort(); } catch (e) {}
+    };
+
+    rec.onend = () => {
+      recRef.current = null;
+      // Auto-restart the session (handles Chrome's 60s mobile timeout, network drops)
+      if (isOpenRef.current && !isBusy.current && !isPlayingAudio.current) {
+        restartTimer.current = setTimeout(() => {
+          if (isOpenRef.current && !isBusy.current && !isPlayingAudio.current) {
+            startListeningRef.current?.();
+          }
+        }, 400);
       }
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+    };
+
+    recRef.current = rec;
+    try { rec.start(); } catch (err) {
+      console.warn('[Voice] start() failed:', err.message);
+    }
+  }, [language, stopAudio, handleQuery]);
+
+  /* Keep a stable ref to startListeningFn so callbacks can call latest version */
+  const startListeningRef = useRef(startListeningFn);
+  useEffect(() => { startListeningRef.current = startListeningFn; }, [startListeningFn]);
+
+  /* ─────────────────────────────────────────────────────────────────────────
+   * Modal open / close lifecycle
+   * ───────────────────────────────────────────────────────────────────────── */
+  useEffect(() => {
+    if (!isOpen) {
+      stopRecognition();
+      stopAudio();
+      isBusy.current = false;
+      isPlayingAudio.current = false;
       setMode('idle');
+      return;
+    }
+
+    // Reset state
+    setUserText('');
+    setInputText('');
+    setAiText('Hey! I\'m listening — ask me about any government scheme.');
+    setPermError(null);
+    isBusy.current = false;
+    isPlayingAudio.current = false;
+    setMode('listening');
+
+    // Request mic permission, then start listening
+    if (navigator.mediaDevices?.getUserMedia) {
+      navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(stream => {
+          stream.getTracks().forEach(t => t.stop());
+          startListeningRef.current?.();
+        })
+        .catch(err => {
+          console.warn('[Voice] getUserMedia error:', err);
+          setPermError('Microphone access is required. Tap the lock icon in your browser bar to allow it.');
+        });
+    } else {
+      startListeningRef.current?.();
     }
 
     return () => {
-      stopAllPlayback();
-      isQueryExecutingRef.current = false;
-      isThinkingRef.current = false;
-      if (recognitionRef.current) {
-        try { recognitionRef.current.abort(); } catch (e) {}
-      }
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      stopRecognition();
+      stopAudio();
+      isBusy.current = false;
+      isPlayingAudio.current = false;
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
+
+  /* ESC key to close */
+  useEffect(() => {
+    const handle = (e) => { if (e.key === 'Escape' && isOpen) onClose(); };
+    window.addEventListener('keydown', handle);
+    return () => window.removeEventListener('keydown', handle);
+  }, [isOpen, onClose]);
+
+  /* ── Typed input submit ── */
+  const handleTypedSubmit = (e) => {
+    e.preventDefault();
+    const q = inputText.trim();
+    if (!q) return;
+    stopRecognition();
+    handleQuery(q);
+  };
+
+  /* ── Orb click: barge-in or manual start ── */
+  const handleOrbClick = () => {
+    if (mode === 'speaking') {
+      // Barge-in: cut AI speech, go back to listening
+      stopAudio();
+      isBusy.current = false;
+      setMode('listening');
+      startListeningRef.current?.();
+    } else if (mode === 'idle') {
+      startListeningRef.current?.();
+    }
+  };
 
   if (!isOpen) return null;
 
+  const statusLabel = {
+    listening: '🎙️ Listening…',
+    thinking:  '💭 Thinking…',
+    speaking:  '🔊 Speaking  —  tap orb to interrupt',
+    idle:      'Tap the orb to start',
+  }[mode] ?? '';
+
   return (
     <div className="siri-modal-backdrop" onClick={onClose}>
-      <div className="siri-modal-card" onClick={(e) => e.stopPropagation()}>
+      <div className="siri-modal-card" onClick={e => e.stopPropagation()}>
+
         {/* Header */}
         <div className="siri-header">
           <div className="siri-badge">
             <span className="siri-dot" />
             <span>JanSeva AI — Voice Mode ({language.toUpperCase()})</span>
           </div>
-          <button className="siri-close-btn" onClick={onClose} title="Close Voice Mode (Esc)">
+          <button className="siri-close-btn" onClick={onClose} title="End call (Esc)">
             <CloseIcon />
           </button>
         </div>
 
-        {/* Central Siri 3D Glowing Orb Visualizer */}
+        {/* Animated Orb */}
         <div
           className="siri-orb-container"
-          title={mode === 'speaking' ? "Tap to interrupt assistant speech" : "Listening to your voice..."}
-          onClick={() => {
-            if (mode === 'speaking') {
-              stopAllPlayback();
-              isQueryExecutingRef.current = false;
-              setMode('listening');
-            }
-          }}
+          title={mode === 'speaking' ? 'Tap to interrupt' : 'Listening…'}
+          onClick={handleOrbClick}
         >
           <div className={`siri-orb-glow ${mode}`} />
           <div className={`siri-orb ${mode}`}>
@@ -635,55 +515,43 @@ const SiriVoiceModal = ({ isOpen, onClose, language = 'en', selectedState = '', 
           </div>
         </div>
 
-        {/* Voice Status Indicator */}
-        <div className="siri-status-text">
-          {mode === 'listening' && "🎙️ Listening..."}
-          {mode === 'thinking' && "💭 Just a sec..."}
-          {mode === 'speaking' && "🔊 Speaking (Tap orb to interrupt)..."}
-        </div>
+        {/* Status */}
+        <div className="siri-status-text">{statusLabel}</div>
 
-        {/* Permission Banner Error */}
-        {micPermissionError && (
-          <div className="siri-error-banner">
-            ⚠️ {micPermissionError}
-          </div>
+        {/* Permission error */}
+        {permError && (
+          <div className="siri-error-banner">⚠️ {permError}</div>
         )}
 
-        {/* Live Conversation Transcript */}
-        <div className="siri-transcript-box" ref={transcriptBoxRef}>
-          {userTranscript && (
+        {/* Live conversation transcript */}
+        <div className="siri-transcript-box">
+          {userText && (
             <div className="siri-user-bubble">
-              <span className="label">You:</span> "{userTranscript}"
+              <span className="label">You:</span> "{userText}"
             </div>
           )}
-          {aiResponseText && (
+          {aiText && (
             <div className="siri-ai-bubble">
-              <span className="label">JanSeva AI:</span> {aiResponseText}
+              <span className="label">JanSeva AI:</span> {aiText}
             </div>
           )}
         </div>
 
-        {/* Fallback Text Input & Send */}
-        <form
-          className="siri-input-form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            handleUserQuery(manualInput);
-          }}
-        >
+        {/* Typed fallback input */}
+        <form className="siri-input-form" onSubmit={handleTypedSubmit}>
           <input
             type="text"
             className="siri-text-input"
-            placeholder="Or type your question here..."
-            value={manualInput}
-            onChange={(e) => setManualInput(e.target.value)}
+            placeholder="Or type your question here…"
+            value={inputText}
+            onChange={e => setInputText(e.target.value)}
           />
-          <button type="submit" className="siri-send-btn" disabled={!manualInput.trim()}>
+          <button type="submit" className="siri-send-btn" disabled={!inputText.trim()}>
             <SendIcon />
           </button>
         </form>
 
-        {/* Footer Action — End Call */}
+        {/* End call */}
         <div className="siri-actions">
           <button className="siri-action-btn end-call" onClick={onClose}>
             End Voice Call
