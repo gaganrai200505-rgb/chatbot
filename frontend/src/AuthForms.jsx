@@ -34,11 +34,13 @@ const AuthForms = () => {
     } catch (err) {
       console.error('Auth error:', err);
       const data = err.response?.data;
-      if (data) {
+      if (typeof data === 'string' && data.trim().startsWith('<')) {
+        setError('Backend URL returned 404/500 HTML error. Please verify your Render backend server URL.');
+      } else if (data && typeof data === 'object') {
         const messages = Object.values(data).flat().join(' ');
         setError(messages || 'Authentication failed.');
       } else {
-        setError('Unable to connect to the server. Is the backend running?');
+        setError(err.message || 'Unable to connect to the server. Is the backend running?');
       }
     } finally {
       setLoading(false);
