@@ -274,3 +274,16 @@ class TextToSpeechAPIView(APIView):
             print(f"[TTS API] Synthesis Error: {e}")
             return Response({"error": f"Speech synthesis failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
+class PingView(APIView):
+    """
+    GET /api/ping/
+    Lightweight no-auth health check endpoint.
+    Pinged every 10 minutes by the frontend to prevent Render free-tier sleep.
+    Returns a minimal JSON response to minimize server load.
+    """
+    permission_classes = (AllowAny,)
+    authentication_classes = ()
+
+    def get(self, request):
+        return Response({"ok": True, "status": "alive"}, status=status.HTTP_200_OK)

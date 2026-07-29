@@ -7,7 +7,7 @@ This module connects the `/chat/` URL endpoint to the `ChatAPIView` class.
 
 from django.urls import path
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
-from .views import ChatAPIView, RegisterView, ChatHistoryView, SessionDetailAPIView, CheckEligibilityAPIView, TextToSpeechAPIView
+from .views import ChatAPIView, RegisterView, ChatHistoryView, SessionDetailAPIView, CheckEligibilityAPIView, TextToSpeechAPIView, PingView
 
 urlpatterns = [
     # Auth
@@ -21,4 +21,7 @@ urlpatterns = [
     path("session/<str:session_id>/", SessionDetailAPIView.as_view(), name="session_detail"),
     path("check-eligibility/", CheckEligibilityAPIView.as_view(), name="check_eligibility"),
     path("tts/", TextToSpeechAPIView.as_view(), name="tts_api"),
+
+    # Health check — keeps Render free-tier server alive (pinged every 10 min)
+    path("ping/", PingView.as_view(), name="ping"),
 ]

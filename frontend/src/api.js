@@ -168,4 +168,31 @@ export const fetchTextToSpeechAudio = async (text, language = 'en', timeoutMs = 
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Keep-Alive: prevent Render free-tier server from sleeping.
+// Pings GET /api/ping/ every 10 minutes.  No auth needed.
+// Started automatically when this module is imported (i.e. on app load).
+// ─────────────────────────────────────────────────────────────────────────────
+const PING_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+
+const pingServer = async () => {
+  try {
+    // Use a plain fetch so it bypasses the Axios JWT interceptor (no token needed)
+    const res = await fetch(`${API_BASE_URL}/ping/`, { method: 'GET', cache: 'no-store' });
+    if (res.ok) {
+      console.debug('[KeepAlive] Server ping OK ✓');
+    } else {
+      console.warn('[KeepAlive] Server ping returned', res.status);
+    }
+  } catch (err) {
+    console.warn('[KeepAlive] Ping failed (server may be cold-starting):', err.message);
+  }
+};
+
+// Ping immediately on load (wakes server if sleeping), then every 10 min
+pingServer();
+setInterval(pingServer, PING_INTERVAL_MS);
+
+export const keepServerAlive = pingServer; // named export for manual use
+
 export default api;
