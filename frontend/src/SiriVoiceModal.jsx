@@ -267,18 +267,22 @@ const SiriVoiceModal = ({ isOpen, onClose, language = 'en', selectedState = '', 
   }, [language, stopAllPlayback]);
 
   /** Play audio blob URL using the persistent Audio element (survives mobile autoplay restrictions) */
-  const playAudioUrl = useCallback(async (audioUrl) => {
+  const playAudioUrl = useCallback(async (audioUrl, cleanTextForFallback) => {
     const audio = persistentAudioRef.current;
     audioRef.current = audio;
 
     audio.src = audioUrl;
     audio.volume = 1;
 
+    // On mobile: DON'T start recognition during playback.
+    // Android/iOS cannot record mic and play speaker audio simultaneously.
+    // Starting recognition here causes instant 'audio-capture' errors that
+    // throttle Chrome's recognition API permanently.
     audio.onplay = () => {
-      isThinkingRef.current = false;
-      if (isOpenRef.current) startRecognitionRef.current?.();
+      isThinkingRef.current = true; // keep locked while speaking
     };
-    audio.onended = () => {
+
+    const onAudioDone = () => {
       URL.revokeObjectURL(audioUrl);
       audioRef.current = null;
       isThinkingRef.current = false;
@@ -286,25 +290,25 @@ const SiriVoiceModal = ({ isOpen, onClose, language = 'en', selectedState = '', 
       setUserTranscript('');
       setManualInput('');
       setMode('listening');
-      startRecognitionRef.current?.();
+      // 500ms delay: gives Android audio system time to switch from
+      // playback mode back to capture mode before mic opens
+      setTimeout(() => {
+        if (isOpenRef.current && !isThinkingRef.current) {
+          startRecognitionRef.current?.();
+        }
+      }, 500);
     };
-    audio.onerror = () => {
-      URL.revokeObjectURL(audioUrl);
-      audioRef.current = null;
-      isThinkingRef.current = false;
-      isQueryExecutingRef.current = false;
-      setUserTranscript('');
-      setManualInput('');
-      setMode('listening');
-      startRecognitionRef.current?.();
-    };
+
+    audio.onended = onAudioDone;
+    audio.onerror = onAudioDone;
 
     try {
       await audio.play();
     } catch (e) {
       console.warn('[TTS] audio.play() was blocked:', e.message);
-      // Final fallback: web speech
-      fallbackWebSpeech(audio._cleanText || '');
+      onAudioDone();
+      // Also try web speech as final fallback
+      if (cleanTextForFallback) fallbackWebSpeech(cleanTextForFallback);
     }
   }, [fallbackWebSpeech]);
 
@@ -315,39 +319,48 @@ const SiriVoiceModal = ({ isOpen, onClose, language = 'en', selectedState = '', 
     const cleanText = sanitizeForSpeech(text, language);
     if (!cleanText || !isOpenRef.current) {
       setMode('listening');
+      isThinkingRef.current = false;
       isQueryExecutingRef.current = false;
+      setTimeout(() => { if (isOpenRef.current) startRecognitionRef.current?.(); }, 350);
       return;
     }
 
     stopAllPlayback();
     setMode('speaking');
+    // Keep isThinkingRef=true throughout entire TTS cycle.
+    // This prevents recognition.onend from restarting the mic prematurely
+    // while we are fetching or playing TTS audio.
+    isThinkingRef.current = true;
 
     if (isMobile) {
       // ── MOBILE PATH: Use backend neural TTS (edge-tts) ──
-      // Mobile browsers block SpeechSynthesis.speak() after async operations.
-      // Backend TTS via persistent Audio element works reliably on Android/iOS.
       try {
-        const audioUrl = await fetchTextToSpeechAudio(cleanText, language, 8000);
+        const audioUrl = await fetchTextToSpeechAudio(cleanText, language, 12000);
         if (!isOpenRef.current) {
           if (audioUrl) URL.revokeObjectURL(audioUrl);
           stopAllPlayback();
+          isThinkingRef.current = false;
+          isQueryExecutingRef.current = false;
           return;
         }
         if (audioUrl) {
-          persistentAudioRef.current._cleanText = cleanText; // store for fallback
-          await playAudioUrl(audioUrl);
+          await playAudioUrl(audioUrl, cleanText);
           return;
         }
       } catch (e) {
-        console.warn('[TTS Mobile] Backend TTS failed, trying WebSpeech:', e.message);
+        console.warn('[TTS Mobile] Backend TTS failed:', e.message);
       }
-      // Mobile fallback: attempt WebSpeech (may be silently blocked)
+      // Mobile fallback — WebSpeech (may be silently blocked but we try)
+      isThinkingRef.current = false;
+      isQueryExecutingRef.current = false;
       fallbackWebSpeech(cleanText);
       return;
     }
 
     // ── DESKTOP PATH: Instant browser WebSpeech API (< 100ms latency) ──
     if (window.speechSynthesis) {
+      isThinkingRef.current = false; // desktop WebSpeech is synchronous, safe to release
+      isQueryExecutingRef.current = false;
       fallbackWebSpeech(cleanText);
       return;
     }
@@ -358,18 +371,22 @@ const SiriVoiceModal = ({ isOpen, onClose, language = 'en', selectedState = '', 
       if (!isOpenRef.current) {
         if (audioUrl) URL.revokeObjectURL(audioUrl);
         stopAllPlayback();
+        isThinkingRef.current = false;
+        isQueryExecutingRef.current = false;
         return;
       }
       if (audioUrl) {
-        await playAudioUrl(audioUrl);
+        await playAudioUrl(audioUrl, cleanText);
         return;
       }
     } catch (e) {
       console.warn('[TTS Desktop] Backend TTS failed:', e.message);
     }
 
-    setMode('listening');
+    isThinkingRef.current = false;
     isQueryExecutingRef.current = false;
+    setMode('listening');
+    setTimeout(() => { if (isOpenRef.current) startRecognitionRef.current?.(); }, 350);
   }, [language, isMobile, stopAllPlayback, fallbackWebSpeech, playAudioUrl]);
 
   // Send User Query to Backend AI (Protected against duplicate concurrent execution)
@@ -411,17 +428,15 @@ const SiriVoiceModal = ({ isOpen, onClose, language = 'en', selectedState = '', 
       const responseText = result.response || "I couldn't find a matching scheme response.";
       setAiResponseText(responseText);
 
-      // Backend API call complete: release thinking state so recognition can restart
-      isThinkingRef.current = false;
-      isQueryExecutingRef.current = false;
-
+      // NOTE: Do NOT reset isThinkingRef/isQueryExecutingRef here.
+      // speakSiriResponse manages these flags throughout the TTS cycle.
+      // Resetting here would cause recognition to restart during TTS fetch,
+      // causing audio-capture conflicts on mobile.
       speakSiriResponse(responseText);
     } catch (err) {
       console.error("[Voice API Error]:", err);
       const errText = err.message || "Failed to connect to the server. Please check backend connection.";
       setAiResponseText(errText);
-      isThinkingRef.current = false;
-      isQueryExecutingRef.current = false;
       speakSiriResponse(errText);
     }
   }, [manualInput, userTranscript, language, selectedState, onSessionStarted, onMessageSent, speakSiriResponse, stopAllPlayback]);
@@ -501,9 +516,11 @@ const SiriVoiceModal = ({ isOpen, onClose, language = 'en', selectedState = '', 
         if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
           setMicPermissionError("Microphone access is blocked. Click the lock 🔒 icon in your browser address bar to allow microphone access.");
         } else if (e.error === 'audio-capture') {
-          setMicPermissionError("No microphone detected or microphone is in use by another app.");
+          // audio-capture on mobile usually means mic is locked by audio playback.
+          // Don't show a scary error — just wait and retry after delay.
+          console.warn('[Voice] audio-capture: mic busy with speaker. Will retry after delay.');
         } else if (e.error === 'no-speech') {
-          // Normal silence, will auto-restart in onend
+          // Normal silence — will auto-restart in onend
         } else if (e.error === 'network') {
           console.warn("[Voice] Network hiccup with speech recognition service.");
         }
@@ -511,12 +528,16 @@ const SiriVoiceModal = ({ isOpen, onClose, language = 'en', selectedState = '', 
 
       recognition.onend = () => {
         recognitionRef.current = null;
-        if (isOpenRef.current && !isThinkingRef.current) {
+        // Only restart if:
+        // 1. Modal is still open
+        // 2. We're not processing a query or fetching/playing TTS (isThinkingRef covers both)
+        // 3. Use 350ms delay to avoid Chrome mobile throttling rapid restarts
+        if (isOpenRef.current && !isThinkingRef.current && !isQueryExecutingRef.current) {
           setTimeout(() => {
-            if (isOpenRef.current && !isThinkingRef.current) {
+            if (isOpenRef.current && !isThinkingRef.current && !isQueryExecutingRef.current) {
               startRecognitionRef.current?.();
             }
-          }, 100);
+          }, 350);
         }
       };
 
