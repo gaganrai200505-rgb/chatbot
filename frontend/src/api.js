@@ -1,8 +1,11 @@
 import axios from 'axios';
 
-// Dynamic API Base URL — supports local PC, LAN IP, and public HTTPS tunnels
+// Dynamic API Base URL — supports local PC, LAN IP, loca.lt tunnels, and Render production
 const getApiBaseUrl = () => {
   const host = typeof window !== 'undefined' ? window.location.hostname : '127.0.0.1';
+  if (host.includes('onrender.com')) {
+    return 'https://janseva-ai-backend.onrender.com/api';
+  }
   if (host.includes('loca.lt')) {
     return 'https://janseva-api-v1.loca.lt/api';
   }
