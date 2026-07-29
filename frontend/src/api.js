@@ -7,7 +7,7 @@ const getApiBaseUrl = () => {
   }
   const host = typeof window !== 'undefined' ? window.location.hostname : '127.0.0.1';
   if (host.includes('onrender.com') || host.includes('vercel.app') || host.includes('netlify.app')) {
-    return 'https://janseva-ai-backend.onrender.com/api';
+    return 'https://chatbot-324d.onrender.com/api';
   }
   if (host.includes('loca.lt')) {
     return 'https://janseva-api-v1.loca.lt/api';
