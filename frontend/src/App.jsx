@@ -195,7 +195,7 @@ const ChatPage = () => {
   const { user, logout } = useAuth();
   const [language, setLanguage] = useState('auto');
   const [selectedState, setSelectedState] = useState('All India / Central Govt');
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 768);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [sessions, setSessions] = useState([]);
   const [historyVersion, setHistoryVersion] = useState(0);
@@ -315,7 +315,11 @@ const ChatPage = () => {
                   <div
                     key={session.id}
                     className={`history-item ${activeSessionId === session.id ? 'active' : ''}`}
-                    onClick={() => setActiveSessionId(session.id)}
+                    onClick={() => {
+                      setActiveSessionId(session.id);
+                      // Auto-close sidebar on mobile after selecting a chat
+                      if (window.innerWidth <= 768) setSidebarOpen(false);
+                    }}
                   >
                     <ChatIcon />
                     
@@ -402,6 +406,15 @@ const ChatPage = () => {
           </div>
         </div>
       </aside>
+
+      {/* ── MOBILE SIDEBAR BACKDROP ── */}
+      {sidebarOpen && (
+        <div
+          className="sidebar-backdrop"
+          onClick={() => setSidebarOpen(false)}
+          aria-hidden="true"
+        />
+      )}
 
       {/* ── MAIN CONTENT ── */}
       <main className="main-content">

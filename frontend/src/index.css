@@ -1711,16 +1711,54 @@ body {
     position: fixed;
     top: 0; left: 0;
     height: 100%;
+    width: 80vw;
+    max-width: 300px;
     transform: translateX(-100%);
-    z-index: 100;
+    z-index: 300;
   }
 
   .sidebar.open {
     transform: translateX(0);
-    box-shadow: 4px 0 40px rgba(0,0,0,0.5);
+    box-shadow: 4px 0 40px rgba(0,0,0,0.6);
   }
 
   .sidebar-toggle { display: flex; }
+
+  /* Dark backdrop behind open sidebar on mobile */
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    z-index: 299;
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
+    animation: fadeInBackdrop 0.2s ease;
+  }
+
+  /* Topbar compact on mobile */
+  .topbar {
+    padding: 0.5rem 0.75rem;
+    gap: 0.4rem;
+  }
+
+  .model-badge { display: none; }
+
+  /* Hide state selector text on very small screens, keep lang selector */
+  .state-selector .lang-select {
+    max-width: 90px;
+    font-size: 0.72rem;
+  }
+}
+
+@keyframes fadeInBackdrop {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Desktop: hide backdrop */
+@media (min-width: 769px) {
+  .sidebar-backdrop { display: none; }
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
