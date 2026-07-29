@@ -150,7 +150,7 @@ export const checkEligibility = async (profileData) => {
 };
 
 /** Synthesize speech using backend neural TTS (edge-tts) with max latency cap */
-export const fetchTextToSpeechAudio = async (text, language = 'en', timeoutMs = 1800) => {
+export const fetchTextToSpeechAudio = async (text, language = 'en', timeoutMs = 10000) => {
   try {
     const response = await api.post(
       '/tts/',

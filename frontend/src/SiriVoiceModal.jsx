@@ -3,6 +3,12 @@ import { sendChatMessage, fetchTextToSpeechAudio } from './api';
 
 const LANG_LOCALE = { auto: 'en-IN', en: 'en-IN', hi: 'hi-IN', kn: 'kn-IN' };
 
+/** Detect mobile browsers (Android + iOS) — Web Speech API is unreliable on mobile after async ops */
+const isMobileBrowser = () => {
+  if (typeof navigator === 'undefined') return false;
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+};
+
 /** Helper to find the best Realistic Gemini / Siri / Natural Neural voice for TTS */
 const getRealisticVoice = (langCode) => {
   if (!window.speechSynthesis) return null;
@@ -127,11 +133,16 @@ const SiriVoiceModal = ({ isOpen, onClose, language = 'en', selectedState = '', 
   const [manualInput, setManualInput] = useState('');
   const [aiResponseText, setAiResponseText] = useState('');
   const [micPermissionError, setMicPermissionError] = useState(null);
+  const isMobile = isMobileBrowser();
 
   const recognitionRef = useRef(null);
   const currentSessionIdRef = useRef(activeSessionId);
   const silenceTimerRef = useRef(null);
   const transcriptBoxRef = useRef(null);
+  // Pre-created Audio element — kept alive so mobile browsers allow .play() after async ops
+  const persistentAudioRef = useRef(new Audio());
+  // Track if audio context has been unlocked by a user gesture
+  const audioUnlockedRef = useRef(false);
 
   useEffect(() => {
     currentSessionIdRef.current = activeSessionId;
@@ -175,15 +186,33 @@ const SiriVoiceModal = ({ isOpen, onClose, language = 'en', selectedState = '', 
     isOpenRef.current = isOpen;
   }, [isOpen]);
 
+  // Unlock audio on first user interaction (required for iOS Safari autoplay)
+  useEffect(() => {
+    const unlock = () => {
+      if (audioUnlockedRef.current) return;
+      audioUnlockedRef.current = true;
+      const a = persistentAudioRef.current;
+      // Play a 0-length silent buffer to "unlock" audio on iOS
+      a.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+      a.volume = 0;
+      a.play().catch(() => {});
+    };
+    document.addEventListener('touchstart', unlock, { once: true, passive: true });
+    document.addEventListener('click', unlock, { once: true });
+    return () => {
+      document.removeEventListener('touchstart', unlock);
+      document.removeEventListener('click', unlock);
+    };
+  }, []);
+
   // Stop all active audio streams (both HTML5 Audio and WebSpeech API)
   const stopAllPlayback = useCallback(() => {
-    if (audioRef.current) {
-      try {
-        audioRef.current.pause();
-        audioRef.current.src = "";
-      } catch (e) {}
-      audioRef.current = null;
-    }
+    const a = persistentAudioRef.current;
+    try {
+      a.pause();
+      a.src = '';
+    } catch (e) {}
+    audioRef.current = null;
     if (window.speechSynthesis) {
       try { window.speechSynthesis.cancel(); } catch (e) {}
     }
@@ -237,7 +266,51 @@ const SiriVoiceModal = ({ isOpen, onClose, language = 'en', selectedState = '', 
     window.speechSynthesis.speak(utterance);
   }, [language, stopAllPlayback]);
 
-  // High-Quality Neural TTS (Instant WebSpeech priority + Edge-TTS fallback)
+  /** Play audio blob URL using the persistent Audio element (survives mobile autoplay restrictions) */
+  const playAudioUrl = useCallback(async (audioUrl) => {
+    const audio = persistentAudioRef.current;
+    audioRef.current = audio;
+
+    audio.src = audioUrl;
+    audio.volume = 1;
+
+    audio.onplay = () => {
+      isThinkingRef.current = false;
+      if (isOpenRef.current) startRecognitionRef.current?.();
+    };
+    audio.onended = () => {
+      URL.revokeObjectURL(audioUrl);
+      audioRef.current = null;
+      isThinkingRef.current = false;
+      isQueryExecutingRef.current = false;
+      setUserTranscript('');
+      setManualInput('');
+      setMode('listening');
+      startRecognitionRef.current?.();
+    };
+    audio.onerror = () => {
+      URL.revokeObjectURL(audioUrl);
+      audioRef.current = null;
+      isThinkingRef.current = false;
+      isQueryExecutingRef.current = false;
+      setUserTranscript('');
+      setManualInput('');
+      setMode('listening');
+      startRecognitionRef.current?.();
+    };
+
+    try {
+      await audio.play();
+    } catch (e) {
+      console.warn('[TTS] audio.play() was blocked:', e.message);
+      // Final fallback: web speech
+      fallbackWebSpeech(audio._cleanText || '');
+    }
+  }, [fallbackWebSpeech]);
+
+  // High-Quality Neural TTS:
+  //  - Mobile: backend edge-tts (neural, multilingual) via persistent Audio element
+  //  - Desktop: browser WebSpeech API (instant, no latency)
   const speakSiriResponse = useCallback(async (text) => {
     const cleanText = sanitizeForSpeech(text, language);
     if (!cleanText || !isOpenRef.current) {
@@ -249,66 +322,55 @@ const SiriVoiceModal = ({ isOpen, onClose, language = 'en', selectedState = '', 
     stopAllPlayback();
     setMode('speaking');
 
-    // 1. INSTANT LOCAL VOICE (< 100ms latency): Prioritize browser WebSpeech for real-time speech!
+    if (isMobile) {
+      // ── MOBILE PATH: Use backend neural TTS (edge-tts) ──
+      // Mobile browsers block SpeechSynthesis.speak() after async operations.
+      // Backend TTS via persistent Audio element works reliably on Android/iOS.
+      try {
+        const audioUrl = await fetchTextToSpeechAudio(cleanText, language, 8000);
+        if (!isOpenRef.current) {
+          if (audioUrl) URL.revokeObjectURL(audioUrl);
+          stopAllPlayback();
+          return;
+        }
+        if (audioUrl) {
+          persistentAudioRef.current._cleanText = cleanText; // store for fallback
+          await playAudioUrl(audioUrl);
+          return;
+        }
+      } catch (e) {
+        console.warn('[TTS Mobile] Backend TTS failed, trying WebSpeech:', e.message);
+      }
+      // Mobile fallback: attempt WebSpeech (may be silently blocked)
+      fallbackWebSpeech(cleanText);
+      return;
+    }
+
+    // ── DESKTOP PATH: Instant browser WebSpeech API (< 100ms latency) ──
     if (window.speechSynthesis) {
       fallbackWebSpeech(cleanText);
       return;
     }
 
-    // 2. NETWORK TTS FALLBACK (with 1.8s timeout cap)
+    // Desktop fallback: backend TTS
     try {
       const audioUrl = await fetchTextToSpeechAudio(cleanText, language, 1800);
-
       if (!isOpenRef.current) {
         if (audioUrl) URL.revokeObjectURL(audioUrl);
         stopAllPlayback();
         return;
       }
-
       if (audioUrl) {
-        stopAllPlayback();
-        const audio = new Audio(audioUrl);
-        audioRef.current = audio;
-
-        audio.onplay = () => {
-          isThinkingRef.current = false;
-          if (isOpenRef.current) {
-            startRecognitionRef.current?.();
-          }
-        };
-
-        audio.onended = () => {
-          URL.revokeObjectURL(audioUrl);
-          audioRef.current = null;
-          isThinkingRef.current = false;
-          isQueryExecutingRef.current = false;
-          setUserTranscript('');
-          setManualInput('');
-          setMode('listening');
-          startRecognitionRef.current?.();
-        };
-
-        audio.onerror = () => {
-          URL.revokeObjectURL(audioUrl);
-          audioRef.current = null;
-          isThinkingRef.current = false;
-          isQueryExecutingRef.current = false;
-          setUserTranscript('');
-          setManualInput('');
-          setMode('listening');
-          startRecognitionRef.current?.();
-        };
-
-        await audio.play();
+        await playAudioUrl(audioUrl);
         return;
       }
     } catch (e) {
-      console.warn("Neural TTS streaming failed:", e);
+      console.warn('[TTS Desktop] Backend TTS failed:', e.message);
     }
 
     setMode('listening');
     isQueryExecutingRef.current = false;
-  }, [language, stopAllPlayback, fallbackWebSpeech]);
+  }, [language, isMobile, stopAllPlayback, fallbackWebSpeech, playAudioUrl]);
 
   // Send User Query to Backend AI (Protected against duplicate concurrent execution)
   const handleUserQuery = useCallback(async (spokenQuery) => {
