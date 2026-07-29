@@ -1,9 +1,12 @@
 import axios from 'axios';
 
-// Dynamic API Base URL — supports local PC, LAN IP, loca.lt tunnels, and Render production
+// Dynamic API Base URL — supports env override, local PC, LAN IP, loca.lt tunnels, Vercel, Netlify, and Render production
 const getApiBaseUrl = () => {
+  if (import.meta.env.VITE_API_BASE_URL) {
+    return import.meta.env.VITE_API_BASE_URL;
+  }
   const host = typeof window !== 'undefined' ? window.location.hostname : '127.0.0.1';
-  if (host.includes('onrender.com')) {
+  if (host.includes('onrender.com') || host.includes('vercel.app') || host.includes('netlify.app')) {
     return 'https://janseva-ai-backend.onrender.com/api';
   }
   if (host.includes('loca.lt')) {
