@@ -11,6 +11,7 @@ from rest_framework.response import Response
 from rest_framework import status, generics
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.contrib.auth.models import User
+from django.db import transaction
 
 from .models import ChatMessage, OTPCode
 from .serializers import UserSerializer, ChatMessageSerializer, PasswordResetSerializer
@@ -34,6 +35,8 @@ class RegisterView(generics.CreateAPIView):
     """
     POST /api/register/
     Registers a new user (is_active=False) and emails a 6-digit OTP for verification.
+    Uses transaction.atomic() so that if email delivery fails, the user creation
+    is automatically rolled back — guaranteeing no unverified account persists in the DB.
     """
     queryset = UserSerializer.Meta.model.objects.all()
     permission_classes = (AllowAny,)
@@ -45,15 +48,15 @@ class RegisterView(generics.CreateAPIView):
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        user = serializer.save()          # is_active=False set in serializer.create()
+
         try:
-            send_otp_email(user, OTPCode.PURPOSE_VERIFY)
+            with transaction.atomic():
+                user = serializer.save()          # is_active=False set in serializer.create()
+                send_otp_email(user, OTPCode.PURPOSE_VERIFY)
         except Exception as e:
-            # Email delivery failed — delete the incomplete user record and report the error clearly
-            print(f"[RegisterView ERROR] send_otp_email failed: {e}")
-            user.delete()
+            print(f"[RegisterView ERROR] Registration failed: {e}")
             return Response(
-                {"error": "Account registration failed: could not send verification email. Please try again in a moment."},
+                {"error": "Account registration failed: could not send verification email. Please check your email address and try again."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE
             )
 
@@ -65,6 +68,7 @@ class RegisterView(generics.CreateAPIView):
             },
             status=status.HTTP_201_CREATED
         )
+
 
 class LogoutView(APIView):
     """
