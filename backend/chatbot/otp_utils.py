@@ -75,18 +75,28 @@ def _send_via_resend_api(api_key, from_email, to_email, subject, body):
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
+    # Resend free testing domain onboarding@resend.dev
+    sender = "JanSeva AI <onboarding@resend.dev>"
     payload = {
-        "from": from_email if "@" in from_email and "gmail.com" not in from_email else "onboarding@resend.dev",
+        "from": sender,
         "to": [to_email],
         "subject": subject,
         "text": body
     }
     req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
-    with urllib.request.urlopen(req, timeout=5) as response:
-        if response.status in (200, 201, 202):
-            print(f"[OTP SUCCESS] Sent via Resend HTTP API to {to_email}")
-            return True
+    try:
+        with urllib.request.urlopen(req, timeout=5) as response:
+            res_body = response.read().decode('utf-8')
+            if response.status in (200, 201, 202):
+                print(f"[OTP SUCCESS] Sent via Resend HTTP API to {to_email}: {res_body}")
+                return True
+    except urllib.error.HTTPError as err:
+        err_text = err.read().decode('utf-8')
+        print(f"[OTP RESEND API ERROR] HTTP {err.code}: {err_text}")
+    except Exception as e:
+        print(f"[OTP RESEND API EXCEPTION] {e}")
     return False
+
 
 
 def send_otp_email(user, purpose):
