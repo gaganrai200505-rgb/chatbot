@@ -93,8 +93,6 @@ class VerifyOTPView(APIView):
     """
     permission_classes = (AllowAny,)
     authentication_classes = ()
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'auth'
 
     def post(self, request):
         username = request.data.get('username', '').strip()
@@ -127,8 +125,6 @@ class ResendOTPView(APIView):
     """
     permission_classes = (AllowAny,)
     authentication_classes = ()
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'auth'
 
     def post(self, request):
         username = request.data.get('username', '').strip()
@@ -153,8 +149,6 @@ class ForgotPasswordView(APIView):
     """
     permission_classes = (AllowAny,)
     authentication_classes = ()
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'auth'
 
     def post(self, request):
         email = request.data.get('email', '').strip().lower()
@@ -191,8 +185,6 @@ class ResetPasswordView(APIView):
     """
     permission_classes = (AllowAny,)
     authentication_classes = ()
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'auth'
 
     def post(self, request):
         email        = request.data.get('email', '').strip().lower()
