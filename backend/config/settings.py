@@ -213,33 +213,33 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 # -------------------------------------------------------
 # Email (Gmail SMTP) — for OTP verification & password reset
 # -------------------------------------------------------
-# Force IPv4 socket resolution on cloud hosts (Render) to prevent [Errno 101] Network is unreachable
-import socket
-try:
-    _orig_getaddrinfo = socket.getaddrinfo
-    def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-        return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
-    socket.getaddrinfo = _ipv4_getaddrinfo
-except Exception as _sock_err:
-    pass
 
-EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.gmail.com").strip('"').strip("'")
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", 465))
+# ── IPv4-only socket patch ──────────────────────────────
+# Render (and most cloud providers) do NOT route IPv6 outbound traffic.
+# Python's socket.getaddrinfo() prefers IPv6 by default, causing
+# [Errno 101] Network is unreachable. We patch it to always use IPv4.
+import socket as _socket_module
 
-EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "").strip('"').strip("'")
-EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "").strip('"').strip("'")
-raw_from = os.getenv("DEFAULT_FROM_EMAIL", "").strip('"').strip("'")
-DEFAULT_FROM_EMAIL = raw_from if raw_from else EMAIL_HOST_USER
+def _force_ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    """Redirect all DNS lookups to IPv4 addresses only."""
+    return _orig_getaddrinfo(host, port, _socket_module.AF_INET, type, proto, flags)
 
-use_tls_env = os.getenv("EMAIL_USE_TLS", "False").lower() in ("true", "1")
-use_ssl_env = os.getenv("EMAIL_USE_SSL", "False").lower() in ("true", "1")
+_orig_getaddrinfo = _socket_module.getaddrinfo
+_socket_module.getaddrinfo = _force_ipv4_getaddrinfo
 
-if EMAIL_PORT == 465 or use_ssl_env or (not use_tls_env and EMAIL_PORT != 587):
-    EMAIL_USE_SSL = True
-    EMAIL_USE_TLS = False
-else:
-    EMAIL_USE_TLS = True
-    EMAIL_USE_SSL = False
+# ── SMTP settings ───────────────────────────────────────
+EMAIL_BACKEND  = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST     = os.getenv("EMAIL_HOST", "smtp.gmail.com").strip('"\'')
+EMAIL_HOST_USER     = os.getenv("EMAIL_HOST_USER", "").strip('"\'')
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "").strip('"\'')
+EMAIL_TIMEOUT  = 20
 
-EMAIL_TIMEOUT = 10
+_raw_from = os.getenv("DEFAULT_FROM_EMAIL", "").strip('"\'')
+DEFAULT_FROM_EMAIL = _raw_from if _raw_from else EMAIL_HOST_USER
+
+# Always use port 587 + STARTTLS on cloud — most reliable outbound config.
+# Gmail App Password works on both 465 and 587; 587 has fewer cloud firewall issues.
+EMAIL_PORT    = 587
+EMAIL_USE_TLS = True
+EMAIL_USE_SSL = False
+
