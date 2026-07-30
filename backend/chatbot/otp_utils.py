@@ -49,9 +49,10 @@ def create_otp(user, purpose):
 def _send_via_brevo_api(api_key, from_email, to_email, subject, body):
     """Send email via Brevo HTTPS REST API (Port 443 — never blocked on cloud)."""
     url = "https://api.brevo.com/v3/smtp/email"
+    clean_key = api_key.strip('"\' \t\r\n')
     headers = {
         "accept": "application/json",
-        "api-key": api_key,
+        "api-key": clean_key,
         "content-type": "application/json"
     }
     payload = {
@@ -61,11 +62,19 @@ def _send_via_brevo_api(api_key, from_email, to_email, subject, body):
         "textContent": body
     }
     req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
-    with urllib.request.urlopen(req, timeout=5) as response:
-        if response.status in (200, 201, 202):
-            print(f"[OTP SUCCESS] Sent via Brevo HTTP API to {to_email}")
-            return True
+    try:
+        with urllib.request.urlopen(req, timeout=8) as response:
+            res_body = response.read().decode('utf-8')
+            if response.status in (200, 201, 202):
+                print(f"[OTP SUCCESS] Sent via Brevo HTTP API to {to_email}: {res_body}")
+                return True
+    except urllib.error.HTTPError as err:
+        err_text = err.read().decode('utf-8')
+        print(f"[OTP BREVO API ERROR] HTTP {err.code}: {err_text}")
+    except Exception as e:
+        print(f"[OTP BREVO API EXCEPTION] {e}")
     return False
+
 
 
 def _send_via_resend_api(api_key, from_email, to_email, subject, body):
