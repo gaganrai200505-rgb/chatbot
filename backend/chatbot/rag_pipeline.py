@@ -225,30 +225,21 @@ Under "**How to Apply:**" or when referencing application steps, ALWAYS include 
 
 def _build_web_prompt(query: str, web_results: str) -> str:
     """
-    Build a Gemini prompt using web search results.
-
-    Args:
-        query:       The original query (English)
-        web_results: Formatted string from web search
-
-    Returns:
-        A formatted prompt string for Gemini
+    Build a prompt using web search results with strict domain guardrails.
     """
-    return f"""You are an authoritative government scheme assistant for Indian citizens.
-Answer the user's question about government schemes accurately, comprehensively, and clearly.
+    return f"""You are JanSeva AI, specialized EXCLUSIVELY in Indian Central and State Government schemes, welfare programs, scholarships, health insurance, pensions, subsidies, and public services.
 
-WEB SEARCH RESULTS:
+WEB SEARCH CONTEXT:
 {web_results}
 
 USER QUESTION: {query}
 
 IMPORTANT INSTRUCTIONS:
-Please construct your answer using EXACTLY the following structure with Markdown headings.
-Use the web search results as your reference. If any section (such as How to Apply or Documents Required) is missing or incomplete in the search results, use your extensive verified knowledge of Indian Government schemes to fill in all missing details. NEVER output "Information not available"; always provide clear, complete, and practical information for all four sections.
-
-CRITICAL FORMATTING RULE:
-Start your response IMMEDIATELY with "**Scheme Details:**". Do NOT include any introductory greetings, meta-disclaimers, or notes about web search results.
-Under "**How to Apply:**" or when referencing application steps, ALWAYS include the exact official .gov.in portal link in markdown format (e.g. [Apply on Official Portal](https://beneficiary.nha.gov.in) or [PM Kisan Portal](https://pmkisan.gov.in)).
+1. IF USER QUESTION IS ABOUT A VALID GOVERNMENT SCHEME OR PUBLIC SERVICE:
+   Start your response IMMEDIATELY with "**Scheme Details:**" and provide the 4 sections below.
+2. IF USER QUESTION IS OFF-TOPIC OR NON-GOVERNMENT (e.g. asking about a celebrity, cricketer, actor, movie, sports star, general topic):
+   DO NOT use the 4-section scheme template. Respond ONLY with:
+   "I am JanSeva AI, specialized strictly in Indian Government schemes and welfare services. Please ask me any question about government schemes like Ayushman Bharat, PM Kisan, NSP scholarships, or state welfare programs!"
 
 **Scheme Details:**
 (Provide a comprehensive overview, key benefits, and official department)
@@ -260,43 +251,41 @@ Under "**How to Apply:**" or when referencing application steps, ALWAYS include 
 (Provide clear step-by-step instructions or modes of application with official .gov.in portal links)
 
 **Documents Required:**
-(List out all required documents in bullet points, such as Aadhaar Card, Passport Photo, Address Proof, Application Form, etc.)
+(List out all required documents in bullet points)
 """
 
 
 def _build_fallback_prompt(query: str) -> str:
-    """Build a prompt allowing LLM to answer from its internal knowledge securely."""
-    return f"""You are an authoritative government scheme assistant for Indian citizens.
-The user asked: "{query}"
+    """Build a prompt allowing LLM to answer from its internal knowledge securely with domain guardrails."""
+    return f"""You are JanSeva AI, specialized EXCLUSIVELY in Indian Central and State Government schemes, welfare programs, scholarships, health insurance, pensions, subsidies, and public services.
 
-Please answer the user's question directly by tapping into your extensive internal training knowledge about Indian Central and State Government schemes. 
-You must provide highly exhaustive and verified information about the scheme, digging deep into your memory for all precise eligibility constraints and every single required document.
+USER QUESTION: {query}
 
 IMPORTANT INSTRUCTIONS:
-Please construct your answer using EXACTLY the following structure with Markdown headings.
-
-CRITICAL FORMATTING RULE:
-Start your response IMMEDIATELY with "**Scheme Details:**". Do NOT include any introductory greetings, meta-disclaimers, or notes about where the information came from.
-Under "**How to Apply:**" or when referencing application steps, ALWAYS include the exact official .gov.in portal link in markdown format (e.g. [Apply on Official Portal](https://pmkisan.gov.in)).
+1. IF USER QUESTION IS ABOUT A VALID GOVERNMENT SCHEME OR PUBLIC SERVICE:
+   Start your response IMMEDIATELY with "**Scheme Details:**" and provide the 4 sections below.
+2. IF USER QUESTION IS OFF-TOPIC OR NON-GOVERNMENT (e.g. asking about a celebrity, cricketer, actor, movie, sports star, general topic):
+   DO NOT use the 4-section scheme template. Respond ONLY with:
+   "I am JanSeva AI, specialized strictly in Indian Government schemes and welfare services. Please ask me any question about government schemes like Ayushman Bharat, PM Kisan, NSP scholarships, or state welfare programs!"
 
 **Scheme Details:**
-(Provide a comprehensive overview, exact benefits, and the official state/central government department associated with it)
+(Provide a comprehensive overview, exact benefits, and official department)
 
 **Eligibility Criteria:**
-(Provide deeply detailed eligibility conditions in bullet points)
+(Provide clear, bulleted eligibility conditions)
 
 **How to Apply:**
-(Provide thorough step-by-step instructions or modes of application with official .gov.in portal links)
+(Provide clear step-by-step instructions or modes of application with official .gov.in portal links)
 
 **Documents Required:**
-(List out every formally required document in bullet points)
+(List out all required documents in bullet points)
 """
 
 
 def is_conversational_ack(query: str) -> bool:
     """
     Detects acknowledgments, greetings, audio checks ('can you hear me', 'hello'),
-    confirmations ('yes that's right', 'correct'), or chit-chat to prevent
+    confirmations ('yes that is right', 'correct'), or chit-chat to prevent
     unwanted RAG search or scheme template dumps.
     """
     import re
@@ -389,7 +378,7 @@ RECENT CONVERSATION:
 {history_str}
 
 The user said: "{query}".
-Give a warm, natural 1-sentence response (under 20 words) confirming their input and asking what specific detail about the scheme under discussion they'd like to explore next (e.g., eligibility, benefits, or how to apply).
+Give a warm, natural 1-sentence response (under 20 words) confirming their input and asking what specific detail about the scheme under discussion they would like to explore next (e.g., eligibility, benefits, or how to apply).
 Write strictly in plain text without markdown or symbols."""
     else:
         return f"""The user said: "{query}" in {lang_name} to JanSeva AI (a real-time voice companion like ChatGPT Voice Mode).
@@ -398,23 +387,29 @@ Give a short, warm, natural 1-sentence response strictly in {lang_name} under 15
 
 def is_non_government_query(query: str) -> bool:
     """
-    Detects if a query is clearly non-government (off-topic), e.g., sports, coding,
-    recipes, movies, trivia, weather, entertainment, etc.
+    Detects if a query is clearly non-government (off-topic), e.g., sports personalities,
+    celebrities, actors, politicians (non-scheme), movies, recipes, general trivia, etc.
     """
     import re
     q = query.lower().strip()
 
-    # Off-topic patterns
+    # Broad off-topic regex patterns
     off_topic_patterns = [
+        r'\bvirat\b', r'\bkohli\b', r'\bdhoni\b', r'\bsachin\b', r'\brohit\b',
+        r'\bcricketer\b', r'\bcelebrity\b', r'\bactor\b', r'\bactress\b',
+        r'\bmovie\b', r'\bcinema\b', r'\bipl\b', r'\bcricket\b', r'\bfootball\b',
         r'\btell me a joke\b', r'\bjoke\b', r'\bsing a song\b', r'\bweather in\b',
-        r'\bipl\b', r'\bcricket\b', r'\bfootball\b', r'\bmovie\b', r'\bcinema\b',
-        r'\bactor\b', r'\bactress\b', r'\brecipe\b', r'\bhow to cook\b',
-        r'\bpython code\b', r'\bjavascript\b', r'\bprogram\b', r'\bgame\b',
-        r'\bcapital of\b', r'\bwho won\b', r'\bpresident of usa\b', r'\btrump\b', r'\bbiden\b',
+        r'\brecipe\b', r'\bhow to cook\b', r'\bpython code\b', r'\bjavascript\b',
+        r'\bprogram\b', r'\bgame\b', r'\bcapital of\b', r'\bwho won\b',
+        r'\bpresident of usa\b', r'\btrump\b', r'\bbiden\b',
     ]
+
     for p in off_topic_patterns:
         if re.search(p, q):
-            return True
+            # Exclude explicit scheme questions (e.g. "tell me about PM Kisan scheme")
+            if not re.search(r'\b(scheme|yojana|welfare|pension|scholarship|subsidy|bima|card|portal|khelo india)\b', q):
+                return True
+
     return False
 
 
@@ -452,7 +447,7 @@ LANGUAGE INSTRUCTION:
 - You MUST respond STRICTLY in {effective_lang}. Write 100% in plain spoken {effective_lang}.
 
 {history_str}
-{ctx_str}USER'S SPOKEN QUESTION: "{query}"
+{ctx_str}USER SPOKEN QUESTION: "{query}"
 
 CHATGPT VOICE AGENT RULES:
 1. TALK LIKE CHATGPT VOICE: Be warm, friendly, natural, and human. Use short natural spoken intros (e.g., "Hey there!", "Oh sure!", "Got it, my friend!").
@@ -470,7 +465,7 @@ def _build_direct_answer_prompt(query: str, context: str, web_results: str = "",
     extra_web = f"\nADDITIONAL WEB SEARCH CONTEXT:\n{web_results}\n" if web_results else ""
     target_topic = f"\nTARGET SCHEME / QUESTION TOPIC:\n{search_query}\n" if search_query else ""
     return f"""You are an authoritative government scheme assistant for Indian citizens.
-Answer the user's question directly, calculate eligibility accurately based on their answers, and be concise.
+Answer the user question directly, calculate eligibility accurately based on their answers, and be concise.
 {target_topic}
 SCHEME CONTEXT:
 {context}
