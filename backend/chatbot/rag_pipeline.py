@@ -86,6 +86,44 @@ def _call_groq_with_fallback(messages, max_tokens=None, temperature=None, prefer
     raise last_error
 
 
+def _call_groq_stream_with_fallback(messages, max_tokens=None, temperature=None, prefer_fast: bool = False):
+    """
+    Executes a streaming chat completion yielding token chunks as they arrive.
+    """
+    client = _get_groq_client()
+    models_to_try = [
+        "llama-3.1-8b-instant",
+        "gemma2-9b-it",
+        "llama-3.3-70b-versatile",
+    ] if prefer_fast else [
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "gemma2-9b-it",
+    ]
+
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            kwargs = {"messages": messages, "model": model_name, "stream": True}
+            if max_tokens:
+                kwargs["max_tokens"] = max_tokens
+            if temperature is not None:
+                kwargs["temperature"] = temperature
+
+            stream_res = client.chat.completions.create(**kwargs)
+            for chunk in stream_res:
+                content = chunk.choices[0].delta.content
+                if content:
+                    yield content
+            return
+        except Exception as e:
+            last_error = e
+            print(f"[RAG Stream] Groq model '{model_name}' error ({e}). Trying fallback model...")
+
+    if last_error:
+        yield "I ran into a temporary network delay trying to fetch that."
+
+
 # -------------------------------------------------------
 # FAISS Search
 # -------------------------------------------------------
@@ -258,7 +296,8 @@ Under "**How to Apply:**" or when referencing application steps, ALWAYS include 
 def is_conversational_ack(query: str) -> bool:
     """
     Detects acknowledgments, greetings, audio checks ('can you hear me', 'hello'),
-    or chit-chat to prevent unwanted RAG search or scheme template dumps.
+    confirmations ('yes that's right', 'correct'), or chit-chat to prevent
+    unwanted RAG search or scheme template dumps.
     """
     import re
     q_clean = re.sub(r'[^\w\s]', '', query.lower()).strip()
@@ -269,7 +308,12 @@ def is_conversational_ack(query: str) -> bool:
         r'hello', r'hi\b', r'hey\b', r'who are you', r'what is your name', r'how are you',
         r'good morning', r'good afternoon', r'good evening',
         r'mic check', r'audio check', r'testing', r'is anyone there', r'are you there',
-        r'thank you', r'thanks', r'ok\b', r'okay\b', r'got it', r'understood', r'goodbye', r'bye\b'
+        r'thank you', r'thanks', r'ok\b', r'okay\b', r'got it', r'understood', r'goodbye', r'bye\b',
+        # Confirmations and affirmations
+        r'yes\b', r'yeah\b', r'yep\b', r'yup\b', r'nope\b',
+        r'yes that', r'yes thats', r'that is right', r'thats right', r'you are right',
+        r'correct\b', r'exactly\b', r'indeed\b', r'absolutely\b', r'of course\b',
+        r'right\b', r'sure\b', r'definitely\b', r'confirmed\b',
     ]
 
     for pattern in conversational_phrases:
@@ -277,9 +321,12 @@ def is_conversational_ack(query: str) -> bool:
             return True
 
     ack_words = {
-        'ok', 'okay', 'k', 'kk', 'thanks', 'thank you', 'thx', 'thankyou', 
-        'got it', 'understood', 'cool', 'great', 'fine', 'sure', 'right', 
-        'yes', 'no', 'hello', 'hi', 'hey', 'bye', 'goodbye', 'nice', 'awesome', 'ok thanks', 'okay thanks'
+        'ok', 'okay', 'k', 'kk', 'thanks', 'thank you', 'thx', 'thankyou',
+        'got it', 'understood', 'cool', 'great', 'fine', 'sure', 'right',
+        'yes', 'no', 'hello', 'hi', 'hey', 'bye', 'goodbye', 'nice', 'awesome',
+        'ok thanks', 'okay thanks', 'yep', 'yeah', 'yup', 'nope', 'correct',
+        'exactly', 'indeed', 'absolutely', 'definitely', 'confirmed', 'true',
+        'yes please', 'no thanks', 'go on', 'continue', 'tell me more',
     }
     if q_clean in ack_words:
         return True
@@ -313,19 +360,81 @@ def is_specific_question(query: str, chat_history: list = None) -> bool:
 
     return False
 
+LANGUAGE_NAMES = {
+    'en': 'English',
+    'hi': 'Hindi (हिंदी)',
+    'kn': 'Kannada (ಕನ್ನಡ)',
+    'ta': 'Tamil (தமிழ்)',
+    'te': 'Telugu (తెలుగు)',
+    'mr': 'Marathi (मराठी)',
+    'bn': 'Bengali (বাংলা)',
+    'gu': 'Gujarati (ગુજરાતી)',
+    'ml': 'Malayalam (മലയാളം)',
+    'pa': 'Punjabi (ਪੰਜਾਬੀ)',
+    'auto': 'English'
+}
 
-def _build_voice_companion_prompt(query: str, context: str = "") -> str:
-    """Build a prompt tailored specifically for live voice mode companion interaction."""
-    ctx_str = f"SCHEME CONTEXT:\n{context}\n\n" if context else ""
-    return f"""You are a helpful, thoughtful real-time companion guiding an Indian citizen in live voice mode.
-{ctx_str}USER QUESTION: {query}
+def _build_conversational_ack_prompt(query: str, chat_history: list = None, target_lang: str = "en") -> str:
+    """Build a prompt for conversational greetings, audio checks, or mid-chat acknowledgments."""
+    lang_name = LANGUAGE_NAMES.get(target_lang, 'English')
+    if chat_history and len(chat_history) > 0:
+        recent = chat_history[-4:]
+        lines = []
+        for m in recent:
+            role = "User" if m.get("role") == "user" else "JanSeva AI"
+            lines.append(f"{role}: {m.get('content', '')[:200]}")
+        history_str = "\n".join(lines)
+        return f"""You are JanSeva AI in a real-time voice call.
+RECENT CONVERSATION:
+{history_str}
 
-CRITICAL VOICE RULES:
-1. Speak in plain, warm, natural spoken prose only — NO markdown, NO bullet points, NO section titles, NO asterisks, NO URLs.
-2. Keep your answer concise, natural, and thoughtful (2 to 3 sentences max, under 50 words total).
-3. Prioritize understanding their intent: answer their question clearly, and if brief or ambiguous, offer a quick, polite clarification.
-4. Sound like a real-time conversation partner right next to them — warm, responsive, and friendly.
-5. End with a subtle, helpful check-in (e.g. "Should I check if you qualify?" or "Want to know how to apply?").
+The user said: "{query}".
+Give a warm, natural 1-sentence response (under 20 words) confirming their input and asking what specific detail about the scheme under discussion they'd like to explore next (e.g., eligibility, benefits, or how to apply).
+Write strictly in plain text without markdown or symbols."""
+    else:
+        return f"""The user said: "{query}" in {lang_name} to JanSeva AI (a real-time voice companion like ChatGPT Voice Mode).
+Give a short, warm, natural 1-sentence response strictly in {lang_name} under 15 words, confirming you hear them loud and clear and asking what scheme they would like to explore today. Write strictly in plain text without markdown or symbols."""
+
+
+def _build_voice_companion_prompt(query: str, context: str = "", target_lang: str = "en", chat_history: list = None) -> str:
+    """Build a prompt tailored specifically for ChatGPT-style live voice companion interaction."""
+    ctx_str = f"VERIFIED SCHEME CONTEXT:\n{context}\n\n" if context else ""
+    lang_name = LANGUAGE_NAMES.get(target_lang, 'English')
+
+    # Detect if query is English text vs non-English
+    import re
+    is_query_english = bool(re.match(r'^[a-zA-Z0-9\s\?\!\.\,\'\-]+$', query.strip()))
+    effective_lang = "English" if is_query_english or target_lang == "en" else lang_name
+
+    # Build a short conversation history string so the LLM knows what topic is active
+    history_str = ""
+    if chat_history:
+        recent = chat_history[-4:]  # last 2 turns
+        lines = []
+        for m in recent:
+            role = "User" if m.get("role") == "user" else "JanSeva AI"
+            lines.append(f"{role}: {m.get('content', '')[:200]}")
+        history_str = "\nRECENT CONVERSATION:\n" + "\n".join(lines) + "\n"
+
+    return f"""You are JanSeva AI, a real-time 2-way voice companion built to sound EXACTLY like ChatGPT Voice Mode.
+You are talking directly to a friend over a live voice call.
+
+LANGUAGE INSTRUCTION:
+- The user spoke in {effective_lang}.
+- You MUST respond STRICTLY in {effective_lang}. If {effective_lang} is English, write 100% in plain English. Do NOT use Hindi unless the user spoke Hindi.
+{history_str}
+{ctx_str}USER'S SPOKEN QUESTION: "{query}"
+
+CRITICAL TOPIC-LOCK RULE:
+- READ the RECENT CONVERSATION above carefully to identify which specific government scheme is currently being discussed.
+- Your answer MUST stay on that EXACT scheme. Do NOT drift to a different scheme or topic.
+- If the user asks about eligibility, documents, or how to apply, answer specifically for the scheme that was just discussed.
+
+CHATGPT VOICE AGENT RULES:
+1. TALK LIKE CHATGPT VOICE: Be warm, friendly, natural, and human. Use short natural spoken intros (e.g., "Hey there!", "Oh sure!", "Got it, my friend!").
+2. EXTREMELY CONCISE (15-35 WORDS MAX): Speak only 1 or 2 short sentences per turn. Never read long paragraphs or list bullet points.
+3. PROACTIVE CONVERSATIONAL ENDING: Always end with a quick, natural 1-sentence question to keep the 2-way conversation going.
+4. PLAIN SPOKEN TEXT ONLY: Absolutely NO markdown, NO asterisks (*), NO hash tags (#), NO numbers as lists, and NO URLs. Write exactly as spoken aloud.
 """
 
 
@@ -346,8 +455,8 @@ USER QUESTION / RESPONSE: {query}
 
 CRITICAL RULES:
 1. FOCUS STRICTLY ON THE TARGET SCHEME / TOPIC ASKED BY THE USER ({search_query or query}).
-   - Calculate eligibility STRICTLY for the scheme being discussed in the conversation (e.g. Free Digital Education / Skill India / PMGDISHA).
-   - DO NOT switch to or evaluate completely unrelated schemes (such as Gruha Lakshmi Scheme or Sukanya Samriddhi) unless the user explicitly requested them.
+   - Calculate eligibility STRICTLY for the scheme being discussed in the conversation.
+   - DO NOT switch to or evaluate completely unrelated schemes unless the user explicitly requested them.
 2. DO NOT OUTPUT FULL TEMPLATE HEADINGS (such as "## Scheme Details:", "## Eligibility Criteria:", "## How to Apply:", "## Documents Required:").
 3. Give ONLY a direct, concise 2-4 sentence answer. Calculate their eligibility immediately based on their provided details (income, land, age, category).
 4. If they are eligible, provide the 1-click official portal link (e.g. [Apply on Portal](https://...)). If they do not qualify, explain clearly in 1-2 sentences why.
@@ -357,8 +466,9 @@ CRITICAL RULES:
 
 def resolve_standalone_query(query_english: str, chat_history: list = None, prefer_fast: bool = False) -> str:
     """
-    Converts ambiguous follow-up queries (e.g., 'is it not available for foreign citizens?')
+    Converts ambiguous follow-up queries (e.g., 'eligibility', 'how to apply')
     into a self-contained search query using recent conversation context.
+    Returns the original query unchanged if resolution fails or output looks wrong.
     """
     if not chat_history or is_conversational_ack(query_english):
         return query_english
@@ -367,12 +477,17 @@ def resolve_standalone_query(query_english: str, chat_history: list = None, pref
         history_lines = []
         for m in chat_history[-6:]:
             role_label = "User" if m.get("role") == "user" else "Assistant"
-            history_lines.append(f"{role_label}: {m.get('content', '')}")
+            history_lines.append(f"{role_label}: {m.get('content', '')[:300]}")
 
         history_str = "\n".join(history_lines)
 
-        prompt = f"""Given the conversation history below and a follow-up question, rephrase the follow-up question into a standalone, self-contained query that includes the specific scheme or topic name being discussed.
-Do NOT answer the question. ONLY return the single rephrased standalone query in English.
+        prompt = f"""Given the conversation history below and a follow-up question, rephrase the follow-up question into a SHORT, standalone search query (maximum 12 words) that includes the specific scheme or topic name.
+
+RULES:
+- Output ONLY the rephrased query. Nothing else. No explanation.
+- The output must be a search query, NOT a sentence like "I couldn't find..." or "Let's start fresh".
+- If the follow-up is just a confirmation (yes/no/correct/right), return: "[Scheme name] overview" where [Scheme name] is the last scheme discussed.
+- Maximum 12 words.
 
 CONVERSATION HISTORY:
 {history_str}
@@ -381,41 +496,54 @@ FOLLOW-UP QUESTION: {query_english}
 
 STANDALONE QUERY:"""
 
-        standalone = _call_groq_with_fallback(
+        client = _get_groq_client()
+        res = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=45,
-            prefer_fast=prefer_fast
+            model="llama-3.1-8b-instant" if prefer_fast else "llama-3.3-70b-versatile",
+            max_tokens=25
         )
-        safe_log = standalone.encode('ascii', 'ignore').decode('ascii')
-        print(f"[RAG] Multi-Turn context resolved: '{query_english}' -> '{safe_log}'")
-        return standalone if len(standalone) > 3 else query_english
+        resolved = res.choices[0].message.content.strip()
+
+        # --- Output validation ---
+        # Reject the resolved query if it looks like a conversational response, not a search query.
+        bad_phrases = [
+            "i couldn't find", "i could not find", "let's start fresh", "let us start fresh",
+            "no specific scheme", "not mentioned", "not discussed", "no scheme was discussed",
+            "i don't know", "i do not know", "unclear", "not clear", "i'm sorry", "i am sorry",
+        ]
+        resolved_lower = resolved.lower()
+        for bad in bad_phrases:
+            if bad in resolved_lower:
+                print(f"[RAG] resolve_standalone_query returned invalid output: '{resolved}' — falling back to original")
+                return query_english
+
+        # Also reject if too long (prose, not a search query) or empty
+        if not resolved or len(resolved.split()) > 15:
+            print(f"[RAG] resolve_standalone_query output too long/empty: '{resolved}' — falling back")
+            return query_english
+
+        print(f"[RAG] Rephrased '{query_english}' -> '{resolved}'")
+        return resolved
     except Exception as e:
-        print(f"[RAG] Standalone query resolution error: {e}")
+        print(f"[RAG] Context resolution error: {e}")
         return query_english
 
 
 def _save_web_knowledge_to_db(query: str, answer: str):
-    """
-    Auto-learning engine: Extracts structured scheme information from newly generated web search
-    responses and persists it to the database & FAISS index for future knowledge base hits.
-    """
-    import re
+    """Auto-learn: Save newly searched web schemes to local SQLite DB."""
     from .models import GovernmentScheme
     from .embeddings import seed_db
 
     try:
-        # Extract title from answer
         title_match = re.search(r'\*\*(?:Scheme Details|Name):\*\*\s*\n?\s*\*?\*?([^\*\n]+)', answer, re.IGNORECASE)
         if not title_match:
             title_match = re.search(r'##\s*([^\n]+)', answer)
             
         clean_title = title_match.group(1).strip() if title_match else query.title()[:100]
         
-        # Don't save duplicates
         if GovernmentScheme.objects.filter(title__iexact=clean_title).exists():
             return
 
-        # Simple extraction of details
         desc = answer[:500]
         
         scheme = GovernmentScheme.objects.create(
@@ -424,8 +552,6 @@ def _save_web_knowledge_to_db(query: str, answer: str):
             details=answer
         )
         print(f"[Auto-Learning] Successfully saved new scheme '{clean_title}' (ID: {scheme.id}) to DB.")
-        
-        # Trigger index rebuild in background or lazily next search
         seed_db()
     except Exception as err:
         print(f"[Auto-Learning] Failed to auto-save scheme: {err}")
@@ -434,42 +560,15 @@ def _save_web_knowledge_to_db(query: str, answer: str):
 # -------------------------------------------------------
 # RAG Pipeline Core Function
 # -------------------------------------------------------
-def get_rag_response(query_english: str, original_query: str, chat_history: list = None, selected_state: str = "", is_voice_mode: bool = False) -> dict:
+def get_rag_response(query_english: str, original_query: str, chat_history: list = None, selected_state: str = "", is_voice_mode: bool = False, target_lang: str = "en") -> dict:
     """
-    Execute the RAG Pipeline:
-    1. Check for conversational acknowledgments
-    2. Resolve multi-turn history context into a standalone query
-    3. Search FAISS index
-    4. Search web if score < SIMILARITY_THRESHOLD or not found
-    5. Construct prompt & call Groq with model failover (optimized for Voice Mode latency & accuracy)
-
-    Args:
-        query_english:  The user's query translated into English
-        original_query: The original query in user's language (for logging)
-        chat_history:   Optional list of previous turns: [{"role": "user"|"assistant", "content": "..."}]
-        selected_state: Optional state filter selected by user (e.g. "Karnataka", "Maharashtra")
-        is_voice_mode:  If True, optimizes prompt and token length for sub-500ms voice generation
-
-    Returns:
-        dict: {
-            "response": str,   # AI-generated answer in English
-            "source":   str,   # "knowledge_base" or "web"
-        }
+    Execute the RAG Pipeline.
     """
-    # Step -1: Check for simple conversational acknowledgment / chit-chat / audio check / greetings
     if is_conversational_ack(query_english):
-        print(f"[RAG] Conversational greeting / audio check detected: '{query_english}'")
+        print(f"[RAG] Conversational greeting / audio check / ack detected: '{query_english}'")
         try:
             client = _get_groq_client()
-            prompt = (
-                f"The user said: '{query_english}' to JanSeva AI (an Indian government scheme voice assistant). "
-                f"Give a punchy, warm, energetic, 1-sentence ChatGPT-style greeting! "
-                f"Examples:\n"
-                f"- If they asked 'can you hear me' or audio check: 'Loud and clear! I\\'m all ears — ask me about any government scheme!'\n"
-                f"- If they said 'hi' or 'hello': 'Hey there! Ready when you are — what government scheme can I help you with today?'\n"
-                f"- If they said 'who are you': 'I\\'m JanSeva AI, your personal guide for all Indian government schemes. What can I help you find?'\n"
-                f"CRITICAL: Do NOT output any scheme details, fake scheme names, or markdown headings. Keep it strictly to 1 punchy sentence under 20 words."
-            )
+            prompt = _build_conversational_ack_prompt(query_english, chat_history=chat_history, target_lang=target_lang)
             res = client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
                 model="llama-3.1-8b-instant" if is_voice_mode else "llama-3.3-70b-versatile",
@@ -479,124 +578,153 @@ def get_rag_response(query_english: str, original_query: str, chat_history: list
                 "response": res.choices[0].message.content.strip(),
                 "source": "conversational"
             }
-        except Exception as e:
+        except Exception:
             return {
                 "response": "Loud and clear! Ready when you are — ask me about any government scheme!",
                 "source": "conversational"
             }
-    # Step 0: Contextual query resolution for multi-turn conversations
+
     search_query = query_english
     if chat_history:
         search_query = resolve_standalone_query(query_english, chat_history, prefer_fast=is_voice_mode)
 
-    # Append selected state to search query if a specific State/UT is selected
-    if selected_state and selected_state != "All India / Central Govt" and selected_state.lower() not in search_query.lower():
-        search_query = f"{search_query} in {selected_state}"
-        print(f"[RAG] State filter applied: '{selected_state}' -> Search query: '{search_query}'")
+    # State Auto-Detection from query
+    indian_states = ["karnataka", "maharashtra", "tamil nadu", "kerala", "telangana", "andhra pradesh", "gujarat", "punjab", "haryana", "rajasthan", "uttar pradesh", "bihar", "west bengal", "madhya pradesh", "odisha", "delhi", "kashmir", "assam"]
+    detected_state = ""
+    for st in indian_states:
+        if st in query_english.lower() or st in original_query.lower():
+            detected_state = st.title()
+            break
 
-    # Detect if user is asking a specific direct question vs a general scheme overview
+    effective_state = detected_state or selected_state
+    if effective_state and effective_state != "All India / Central Govt" and effective_state.lower() not in search_query.lower():
+        search_query = f"{search_query} in {effective_state}"
+        print(f"[RAG] State filter applied: '{effective_state}' -> Search query: '{search_query}'")
+
     is_direct_q = is_specific_question(query_english, chat_history) or is_voice_mode
-
-    # Step 1: Search the FAISS knowledge base using resolved standalone query
     matched_scheme, score = retrieve_from_knowledge_base(search_query)
 
-    # Step 2: Build the appropriate prompt
-    # VOICE MODE FAST PATH: Uses dedicated companion prompt and skips web search for sub-second latency
     if is_voice_mode:
-        if matched_scheme:
-            kb_context_str = "\n".join([f"{s['title']}: {s['description']}\n{s.get('details','')}" for s in matched_scheme])
-            prompt = _build_voice_companion_prompt(query_english, kb_context_str)
+        if matched_scheme and score >= 0.55:
+            kb_context_str = "\n".join([f"Scheme: {s['title']} (State/Dept: {s.get('state', 'All India')})\nDescription: {s['description']}\nDetails: {s.get('details','')}" for s in matched_scheme[:2]])
+            prompt = _build_voice_companion_prompt(query_english, kb_context_str, target_lang=target_lang)
             source = "knowledge_base"
-            print(f"[RAG][VOICE] Instant KB voice companion prompt for '{query_english}'.")
         else:
-            prompt = _build_voice_companion_prompt(query_english)
-            source = "llm_fallback"
-            print(f"[RAG][VOICE] Instant LLM voice companion prompt for '{query_english}'.")
+            web_results = search_web(search_query)
+            prompt = _build_voice_companion_prompt(query_english, context=web_results, target_lang=target_lang)
+            source = "web"
     elif matched_scheme:
+        web_results = "" if score >= 0.55 else search_web(search_query)
+        kb_context_str = "\n".join([f"{s['title']}: {s['description']}\n{s.get('details','')}" for s in matched_scheme])
         if is_direct_q:
-            web_results = search_web(search_query)
-            kb_context_str = "\n".join([f"{s['title']}: {s['description']}\n{s.get('details','')}" for s in matched_scheme])
             prompt = _build_direct_answer_prompt(query_english, kb_context_str, web_results=web_results, search_query=search_query)
-            print(f"[RAG] Direct question prompt generated for '{query_english}' using KB context.")
         else:
-            web_results = search_web(search_query)
             prompt = _build_kb_prompt(search_query, matched_scheme, web_results=web_results)
-            print(f"[RAG] Using knowledge base (score: {score:.4f}) with web enrichment.")
         source = "knowledge_base"
     else:
         web_results = search_web(search_query)
         if is_direct_q:
             prompt = _build_direct_answer_prompt(query_english, web_results or search_query, web_results=web_results, search_query=search_query)
             source = "web"
-            print(f"[RAG] Direct question prompt generated for '{query_english}' using web search.")
         elif web_results:
             prompt = _build_web_prompt(search_query, web_results)
             source = "web"
-            print(f"[RAG] Using web search fallback for: '{search_query}'")
         else:
             prompt = _build_fallback_prompt(search_query)
             source = "llm_fallback"
-            print(f"[RAG] Using LLM general knowledge fallback for: '{search_query}'")
 
-    # Step 3: Construct chat message payload for Groq LLM
     messages_payload = [{"role": "user", "content": prompt}]
-
-    # Step 4: Generate response using Groq with model failover
-    # Voice mode: prefer fast 8B model + tight token cap for instant sub-second response
     try:
-        max_t = 85 if is_voice_mode else None
+        max_t = 280 if is_voice_mode else None
         answer = _call_groq_with_fallback(
             messages=messages_payload,
             max_tokens=max_t,
-            prefer_fast=is_voice_mode   # Use instant 8B model for voice
+            prefer_fast=is_voice_mode
         )
-
-        # Post-processing: Strip out any introductory meta-commentary preamble if general scheme overview
-        if not is_direct_q:
-            import re
-            match = re.search(r'(\*\*Scheme Details:\*\*|## Scheme Details:)', answer, re.IGNORECASE)
-            if match:
-                answer = answer[match.start():].strip()
-
-        print(f"[RAG] Groq response generated ({len(answer)} chars)")
-
-        # Step 5: Auto-learning! If general scheme overview wasn't in DB, save it so future queries hit KB
-        if not matched_scheme and not is_direct_q and answer:
-            _save_web_knowledge_to_db(search_query, answer)
-
+        return {
+            "response": answer,
+            "source": source,
+        }
     except Exception as e:
-        print(f"[RAG] Groq API timeout or error (using mock fallback): {e}")
-        if is_voice_mode:
-            answer = "I ran into a temporary network delay trying to fetch that. Could you ask me again?"
-        elif matched_scheme:
-            scheme = matched_scheme[0]
-            answer = (
-                f"I am experiencing network connectivity issues and cannot generate a conversational response right now. "
-                f"However, I found the exact scheme you are looking for in the local database:\n\n"
-                f"**Scheme Details:**\n"
-                f"**{scheme.get('title', 'Unknown Scheme')}**\n"
-                f"{scheme.get('description', '')}\n\n"
-                f"**Key Details & Eligibility:**\n"
-                f"{scheme.get('details', 'No additional details provided.')}\n\n"
-                f"**Target Demographic:**\n"
-                f"Applicable for {scheme.get('target_demographic', 'eligible citizens')} in {scheme.get('state', 'all states')}.\n\n"
-                f"**How to Apply:**\n"
-                f"Please refer to the official government portal regarding this scheme.\n\n"
-                f"**Documents Required:**\n"
-                f"- Aadhaar Card\n"
-                f"- Domicile/Resident Certificate\n"
-                f"- Bank Passbook\n"
-                f"- Passport-sized photograph"
-            )
-        else:
-            answer = (
-                "I'm operating in disconnected mode due to a system network error. "
-                "Your query didn't perfectly match any locally cached schemes. "
-                "Please check back when network connectivity is restored for a full web search."
-            )
-        source = "offline_mock"
+        return {
+            "response": "I ran into a temporary network delay trying to fetch that. Could you ask me again?",
+            "source": "error"
+        }
 
-    return {
-        "response": answer,
-        "source": source,
+
+def get_rag_response_stream(query_english: str, original_query: str, chat_history: list = None, selected_state: str = "", is_voice_mode: bool = False, target_lang: str = "en"):
+    """
+    Generator yielding realtime LLM tokens for ultra-low latency SSE response.
+    """
+    if is_conversational_ack(query_english):
+        try:
+            prompt = _build_conversational_ack_prompt(query_english, chat_history=chat_history, target_lang=target_lang)
+            for token in _call_groq_stream_with_fallback([{"role": "user", "content": prompt}], max_tokens=35, prefer_fast=is_voice_mode):
+                yield token
+            return
+        except Exception:
+            yield "I can hear you loud and clear! What government scheme would you like to explore today?"
+            return
+
+    search_query = query_english
+    # Resolve standalone query when history exists:
+    # Always resolve in voice mode (short follow-ups like "check my eligibility" lose context without it).
+    # In text mode, resolve when the query is short (<= 10 words) or contains ambiguous pronouns/terms.
+    ambiguous_terms = {
+        'it', 'this', 'that', 'he', 'she', 'they', 'them', 'his', 'her', 'its',
+        'scheme', 'eligible', 'eligibility', 'apply', 'applying', 'applied',
+        'documents', 'benefits', 'criteria', 'check', 'status', 'more', 'more info'
     }
+    query_words = set(query_english.lower().split())
+    should_resolve = chat_history and len(chat_history) > 0 and (
+        is_voice_mode or                            # always resolve in voice mode
+        (query_words & ambiguous_terms) or          # ambiguous follow-up
+        len(query_words) <= 10                      # short query likely needs context
+    )
+    if should_resolve:
+        search_query = resolve_standalone_query(query_english, chat_history, prefer_fast=is_voice_mode)
+
+    # State Auto-Detection from query
+    indian_states = ["karnataka", "maharashtra", "tamil nadu", "kerala", "telangana", "andhra pradesh", "gujarat", "punjab", "haryana", "rajasthan", "uttar pradesh", "bihar", "west bengal", "madhya pradesh", "odisha", "delhi", "kashmir", "assam"]
+    detected_state = ""
+    for st in indian_states:
+        if st in query_english.lower() or st in original_query.lower():
+            detected_state = st.title()
+            break
+
+    effective_state = detected_state or selected_state
+    if effective_state and effective_state != "All India / Central Govt" and effective_state.lower() not in search_query.lower():
+        search_query = f"{search_query} in {effective_state}"
+        print(f"[RAG Stream] State filter applied: '{effective_state}' -> Search query: '{search_query}'")
+
+    is_direct_q = is_specific_question(query_english, chat_history) or is_voice_mode
+    matched_scheme, score = retrieve_from_knowledge_base(search_query)
+
+    if is_voice_mode:
+        if matched_scheme and score >= 0.35:
+            kb_context_str = "\n".join([f"Scheme: {s['title']} (State/Dept: {s.get('state', 'All India')})\nDescription: {s['description']}\nDetails: {s.get('details','')}" for s in matched_scheme[:2]])
+            prompt = _build_voice_companion_prompt(query_english, kb_context_str, target_lang=target_lang, chat_history=chat_history)
+        else:
+            web_results = search_web(search_query)
+            prompt = _build_voice_companion_prompt(query_english, context=web_results, target_lang=target_lang, chat_history=chat_history)
+    elif matched_scheme:
+        web_results = "" if score >= 0.60 else search_web(search_query)
+        kb_context_str = "\n".join([f"{s['title']}: {s['description']}\n{s.get('details','')}" for s in matched_scheme])
+        if is_direct_q:
+            prompt = _build_direct_answer_prompt(query_english, kb_context_str, web_results=web_results, search_query=search_query)
+        else:
+            prompt = _build_kb_prompt(search_query, matched_scheme, web_results=web_results)
+    else:
+        web_results = search_web(search_query)
+        if is_direct_q:
+            prompt = _build_direct_answer_prompt(query_english, web_results or search_query, web_results=web_results, search_query=search_query)
+        elif web_results:
+            prompt = _build_web_prompt(search_query, web_results)
+        else:
+            prompt = _build_fallback_prompt(search_query)
+
+    messages_payload = [{"role": "user", "content": prompt}]
+    max_t = 280 if is_voice_mode else None
+
+    for chunk in _call_groq_stream_with_fallback(messages_payload, max_tokens=max_t, prefer_fast=is_voice_mode):
+        yield chunk

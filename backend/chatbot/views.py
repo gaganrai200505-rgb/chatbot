@@ -10,21 +10,203 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, generics
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from django.contrib.auth.models import User
 
-from .models import ChatMessage
-from .serializers import UserSerializer, ChatMessageSerializer
+from .models import ChatMessage, OTPCode
+from .serializers import UserSerializer, ChatMessageSerializer, PasswordResetSerializer
+from .otp_utils import send_otp_email
 from .translation import detect_language, translate_to_english, translate_from_english
 from .rag_pipeline import get_rag_response
+
+from rest_framework.throttling import ScopedRateThrottle
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenObtainPairView
+
+class ThrottledTokenObtainPairView(TokenObtainPairView):
+    """
+    POST /api/token/
+    Obtains access and refresh tokens with rate limiting.
+    """
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
 
 class RegisterView(generics.CreateAPIView):
     """
     POST /api/register/
-    Registers a new user.
+    Registers a new user (is_active=False) and emails a 6-digit OTP for verification.
     """
     queryset = UserSerializer.Meta.model.objects.all()
     permission_classes = (AllowAny,)
     authentication_classes = ()
     serializer_class = UserSerializer
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()          # is_active=False set in serializer.create()
+        try:
+            send_otp_email(user, OTPCode.PURPOSE_VERIFY)
+        except Exception as e:
+            # If email fails, clean up the user and report the error
+            user.delete()
+            return Response(
+                {"error": f"Failed to send verification email: {str(e)}. Please check your email address and try again."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        return Response(
+            {"message": "Account created. A 6-digit OTP has been sent to your email.", "username": user.username},
+            status=status.HTTP_201_CREATED
+        )
+
+class LogoutView(APIView):
+    """
+    POST /api/logout/
+    Blacklists the user's refresh token on logout.
+    """
+    permission_classes = (IsAuthenticated,)
+
+    def post(self, request):
+        try:
+            refresh_token = request.data.get("refresh")
+            if not refresh_token:
+                return Response({"error": "Refresh token is required."}, status=status.HTTP_400_BAD_REQUEST)
+            token = RefreshToken(refresh_token)
+            token.blacklist()
+            return Response({"message": "Successfully logged out."}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": "Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class VerifyOTPView(APIView):
+    """
+    POST /api/verify-otp/
+    Verifies the 6-digit OTP sent on registration and activates the account.
+    Body: { "username": "...", "otp": "123456" }
+    """
+    permission_classes = (AllowAny,)
+    authentication_classes = ()
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
+
+    def post(self, request):
+        username = request.data.get('username', '').strip()
+        code     = request.data.get('otp', '').strip()
+        if not username or not code:
+            return Response({'error': 'Username and OTP are required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            user = User.objects.get(username=username)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        otp = OTPCode.objects.filter(user=user, code=code, purpose=OTPCode.PURPOSE_VERIFY, is_used=False).last()
+        if not otp:
+            return Response({'error': 'Invalid OTP. Please check the code or request a new one.'}, status=status.HTTP_400_BAD_REQUEST)
+        if otp.is_expired():
+            return Response({'error': 'OTP has expired. Please request a new one.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        otp.is_used = True
+        otp.save()
+        user.is_active = True
+        user.save()
+        return Response({'message': 'Email verified successfully. You can now sign in.'}, status=status.HTTP_200_OK)
+
+
+class ResendOTPView(APIView):
+    """
+    POST /api/resend-otp/
+    Resends the verification OTP for a pending (inactive) account.
+    Body: { "username": "..." }
+    """
+    permission_classes = (AllowAny,)
+    authentication_classes = ()
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
+
+    def post(self, request):
+        username = request.data.get('username', '').strip()
+        if not username:
+            return Response({'error': 'Username is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            user = User.objects.get(username=username, is_active=False)
+        except User.DoesNotExist:
+            return Response({'error': 'No pending account found for this username.'}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            send_otp_email(user, OTPCode.PURPOSE_VERIFY)
+        except Exception as e:
+            return Response({'error': f'Failed to send email: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({'message': 'A new OTP has been sent to your email.'}, status=status.HTTP_200_OK)
+
+
+class ForgotPasswordView(APIView):
+    """
+    POST /api/forgot-password/
+    Sends a password reset OTP to the user's registered email.
+    Body: { "email": "..." }
+    """
+    permission_classes = (AllowAny,)
+    authentication_classes = ()
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
+
+    def post(self, request):
+        email = request.data.get('email', '').strip().lower()
+        if not email:
+            return Response({'error': 'Email address is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        # Always return a success message to prevent email enumeration attacks
+        try:
+            user = User.objects.get(email__iexact=email, is_active=True)
+            send_otp_email(user, OTPCode.PURPOSE_RESET)
+        except User.DoesNotExist:
+            pass
+        except Exception as e:
+            return Response({'error': f'Failed to send email: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(
+            {'message': 'If an account with that email exists, a reset OTP has been sent.'},
+            status=status.HTTP_200_OK
+        )
+
+
+class ResetPasswordView(APIView):
+    """
+    POST /api/reset-password/
+    Validates the reset OTP and sets a new password.
+    Body: { "email": "...", "otp": "123456", "new_password": "..." }
+    """
+    permission_classes = (AllowAny,)
+    authentication_classes = ()
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
+
+    def post(self, request):
+        email        = request.data.get('email', '').strip().lower()
+        code         = request.data.get('otp', '').strip()
+        new_password = request.data.get('new_password', '')
+        if not email or not code or not new_password:
+            return Response({'error': 'Email, OTP, and new password are required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = PasswordResetSerializer(data={'new_password': new_password})
+        if not serializer.is_valid():
+            msgs = ' '.join(serializer.errors.get('new_password', ['Invalid password.']))
+            return Response({'error': msgs}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            user = User.objects.get(email__iexact=email, is_active=True)
+        except User.DoesNotExist:
+            return Response({'error': 'No active account found with that email.'}, status=status.HTTP_404_NOT_FOUND)
+
+        otp = OTPCode.objects.filter(user=user, code=code, purpose=OTPCode.PURPOSE_RESET, is_used=False).last()
+        if not otp:
+            return Response({'error': 'Invalid OTP.'}, status=status.HTTP_400_BAD_REQUEST)
+        if otp.is_expired():
+            return Response({'error': 'OTP has expired. Please request a new one.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        otp.is_used = True
+        otp.save()
+        user.set_password(new_password)
+        user.save()
+        return Response({'message': 'Password reset successfully. You can now sign in with your new password.'}, status=status.HTTP_200_OK)
 
 class ChatHistoryView(generics.ListAPIView):
     """
@@ -46,32 +228,36 @@ class ChatAPIView(APIView):
 
     def post(self, request, format=None):
         import uuid
-        query = request.data.get("query", "").strip()
-        requested_language = request.data.get("language", "")
-        session_id = request.data.get("session_id", "").strip()
+        query = str(request.data.get("query") or "").strip()
+        requested_language = str(request.data.get("language") or "")
+        raw_session_id = str(request.data.get("session_id") or "").strip()
+        session_id = raw_session_id if raw_session_id and raw_session_id != "None" else f"session_{uuid.uuid4().hex[:12]}"
 
-        if not session_id:
-            session_id = f"session_{uuid.uuid4().hex[:12]}"
-
-        if not query:
+        if not query or query == "None":
             return Response(
                 {"error": "Query cannot be empty."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        state_filter = request.data.get("state", "").strip()
-        is_voice = request.data.get("is_voice", False)
+        raw_state = str(request.data.get("state") or "").strip()
+        state_filter = "" if raw_state == "None" else raw_state
+        is_voice = bool(request.data.get("is_voice", False))
 
         print(f"\n[{'*'*40}]")
         print(f"[API] New Query: '{query}' | VoiceMode: {is_voice} | State Filter: '{state_filter}' | Session: '{session_id}' | User: {request.user}")
 
         try:
-            if not requested_language or requested_language == "auto":
+            import re
+            is_ascii_eng = bool(re.match(r'^[a-zA-Z0-9\s\?\!\.\,\'\-]+$', query.strip()))
+
+            if is_ascii_eng:
+                detected_lang = "en"
+            elif not requested_language or requested_language == "auto":
                 detected_lang = detect_language(query)
             else:
                 detected_lang = requested_language
             
-            query_english = translate_to_english(query, detected_lang)
+            query_english = translate_to_english(query, detected_lang) if detected_lang != "en" else query
 
             # Retrieve recent conversation history for THIS specific session
             recent_msgs = ChatMessage.objects.filter(user=request.user, session_id=session_id).order_by('-timestamp')[:6]
@@ -80,7 +266,45 @@ class ChatAPIView(APIView):
                 chat_history.append({"role": "user", "content": m.query})
                 chat_history.append({"role": "assistant", "content": m.response})
 
-            rag_result = get_rag_response(query_english, query, chat_history=chat_history, selected_state=state_filter, is_voice_mode=is_voice)
+            want_stream = bool(request.data.get("stream", False)) or bool(request.data.get("is_stream", False))
+            if want_stream:
+                from django.http import StreamingHttpResponse
+                from .rag_pipeline import get_rag_response_stream
+
+                user_obj = request.user
+                sess_id = session_id
+                q_text = query
+                lang_code = detected_lang
+
+                def event_stream():
+                    acc_chunks = []
+                    import json
+                    for token_chunk in get_rag_response_stream(query_english, query, chat_history=chat_history, selected_state=state_filter, is_voice_mode=is_voice, target_lang=lang_code):
+                        acc_chunks.append(token_chunk)
+                        yield f"data: {json.dumps({'token': token_chunk, 'session_id': sess_id})}\n\n"
+                    
+                    full_acc = "".join(acc_chunks)
+                    # The LLM stream already outputs in target_lang directly; avoid redundant 3-second GoogleTranslator HTTP lag
+                    final_txt = full_acc
+                    try:
+                        ChatMessage.objects.create(
+                            user=user_obj,
+                            session_id=sess_id,
+                            query=q_text,
+                            response=final_txt,
+                            language=lang_code,
+                            source="stream_rag"
+                        )
+                    except Exception as err:
+                        print(f"[StreamDB] Failed to save stream message: {err}")
+                    yield "data: [DONE]\n\n"
+
+                res = StreamingHttpResponse(event_stream(), content_type='text/event-stream')
+                res['Cache-Control'] = 'no-cache'
+                res['X-Accel-Buffering'] = 'no'
+                return res
+
+            rag_result = get_rag_response(query_english, query, chat_history=chat_history, selected_state=state_filter, is_voice_mode=is_voice, target_lang=detected_lang)
             english_response = rag_result["response"]
             source = rag_result["source"]
             final_response = translate_from_english(english_response, detected_lang)
@@ -225,14 +449,16 @@ JSON Array schema per item:
 class TextToSpeechAPIView(APIView):
     """
     POST /api/tts/
-    Synthesizes text into high-quality neural MP3 audio stream using edge-tts.
+    Synthesizes text into high-quality neural MP3 audio stream using edge-tts with gTTS fallback.
     """
     permission_classes = (AllowAny,)
     authentication_classes = ()
 
     def post(self, request, format=None):
-        import asyncio
         import edge_tts
+        import io
+        from gtts import gTTS
+        from asgiref.sync import async_to_sync
         from django.http import HttpResponse
 
         text = request.data.get("text", "").strip()
@@ -246,19 +472,31 @@ class TextToSpeechAPIView(APIView):
         clean_text = re.sub(r'https?://\S+', '', text)
         clean_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', clean_text)
         clean_text = re.sub(r'[*_~`#|]', '', clean_text).strip()
+        if not clean_text:
+            clean_text = "Here is the information you requested."
 
-        # Map language code to Microsoft Neural Male Voices (ChatGPT Onyx/Cove style)
+        voice_id = request.data.get("voice_id", "").lower().strip()
+
+        # Map language code & voice_id to ChatGPT Neural Voices (Onyx, Cove, Sky, Breeze)
         VOICE_MAP = {
-            "en": "en-US-ChristopherNeural",   # Warm, smooth ChatGPT-like male voice (Onyx style)
-            "en-in": "en-IN-PrabhatNeural",    # Indian English neural male voice
-            "hi": "hi-IN-MadhurNeural",        # High quality Hindi neural male voice
-            "kn": "kn-IN-GaganNeural",         # High quality Kannada neural male voice
+            "en": "en-US-ChristopherNeural",            # ChatGPT Onyx style warm, smooth voice
+            "en-in": "en-IN-PrabhatNeural",             # Warm Indian male neural voice
+            "hi": "hi-IN-MadhurNeural",                 # High quality Hindi neural voice
+            "kn": "kn-IN-GaganNeural",                  # High quality Kannada neural voice
+            "ta": "ta-IN-ValluvarNeural",               # High quality Tamil neural voice
+            "te": "te-IN-MohanNeural",                  # High quality Telugu neural voice
             "auto": "en-US-ChristopherNeural",
         }
-        chosen_voice = VOICE_MAP.get(language, "en-US-ChristopherNeural")
 
-        async def generate_mp3_bytes():
-            communicate = edge_tts.Communicate(clean_text, chosen_voice, rate="+8%", pitch="+0Hz")
+        if voice_id in ["sky", "breeze", "female"]:
+            chosen_voice = "en-US-AvaMultilingualNeural"
+        elif voice_id in ["onyx", "cove", "male"]:
+            chosen_voice = "en-US-ChristopherNeural"
+        else:
+            chosen_voice = VOICE_MAP.get(language, "en-US-ChristopherNeural")
+
+        async def generate_edge_mp3():
+            communicate = edge_tts.Communicate(clean_text, chosen_voice, rate="+6%", pitch="+0Hz")
             mp3_data = bytearray()
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
@@ -266,12 +504,22 @@ class TextToSpeechAPIView(APIView):
             return bytes(mp3_data)
 
         try:
-            audio_bytes = asyncio.run(generate_mp3_bytes())
+            try:
+                audio_bytes = async_to_sync(generate_edge_mp3)()
+                print(f"[TTS API] Edge-TTS success: {len(audio_bytes)} bytes for '{clean_text[:30]}'")
+            except Exception as edge_err:
+                print(f"[TTS API] Edge-TTS error ({edge_err}), using fallback gTTS...")
+                gtts_lang = language if language in ['hi', 'kn', 'ta', 'te', 'mr', 'bn', 'gu'] else 'en'
+                tts = gTTS(text=clean_text, lang=gtts_lang)
+                fp = io.BytesIO()
+                tts.write_to_fp(fp)
+                audio_bytes = fp.getvalue()
+
             response = HttpResponse(audio_bytes, content_type="audio/mpeg")
             response["Content-Disposition"] = 'inline; filename="speech.mp3"'
             return response
         except Exception as e:
-            print(f"[TTS API] Synthesis Error: {e}")
+            print(f"[TTS API] Synthesis Fatal Error: {e}")
             return Response({"error": f"Speech synthesis failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 

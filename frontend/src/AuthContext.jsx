@@ -20,8 +20,8 @@ export const AuthProvider = ({ children }) => {
     setUser({ username });
   };
 
-  const logout = () => {
-    logoutUser();
+  const logout = async () => {
+    await logoutUser();
     localStorage.removeItem('username');
     setUser(null);
   };

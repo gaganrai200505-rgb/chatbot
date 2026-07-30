@@ -69,3 +69,27 @@ class GovernmentScheme(models.Model):
 
     class Meta:
         ordering = ['title']
+
+
+class OTPCode(models.Model):
+    """
+    Stores a one-time password for email verification or password reset.
+    OTPs are 6-digit codes that expire after 10 minutes and are single-use.
+    """
+    PURPOSE_VERIFY   = 'verify'
+    PURPOSE_RESET    = 'reset'
+    PURPOSE_CHOICES  = [(PURPOSE_VERIFY, 'Email Verification'), (PURPOSE_RESET, 'Password Reset')]
+
+    user        = models.ForeignKey(User, on_delete=models.CASCADE, related_name='otps')
+    code        = models.CharField(max_length=6)
+    purpose     = models.CharField(max_length=10, choices=PURPOSE_CHOICES, default=PURPOSE_VERIFY)
+    is_used     = models.BooleanField(default=False)
+    created_at  = models.DateTimeField(auto_now_add=True)
+
+    def is_expired(self):
+        from django.utils import timezone
+        from datetime import timedelta
+        return timezone.now() > self.created_at + timedelta(minutes=10)
+
+    def __str__(self):
+        return f"{self.user.username} — {self.purpose} OTP ({self.code})"

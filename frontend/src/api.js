@@ -50,9 +50,12 @@ api.interceptors.response.use(
           originalRequest.headers.Authorization = `Bearer ${newAccess}`;
           return api(originalRequest);
         } catch (refreshErr) {
-          console.warn("Token refresh failed. Clearing tokens.");
+          console.warn("Token refresh failed. Logging out user.");
           localStorage.removeItem('access_token');
           localStorage.removeItem('refresh_token');
+          localStorage.removeItem('username');
+          // Force a page reload to redirect the user to the login screen
+          window.location.href = '/';
         }
       }
     }
@@ -80,10 +83,42 @@ export const loginUser = async (username, password) => {
   return response.data;
 };
 
-/** Logout — clear tokens */
-export const logoutUser = () => {
+/** Logout — blacklist refresh token and clear local tokens */
+export const logoutUser = async () => {
+  const refresh = localStorage.getItem('refresh_token');
+  if (refresh) {
+    try {
+      await api.post('/logout/', { refresh });
+    } catch (err) {
+      console.warn("Logout API notification failed:", err.message);
+    }
+  }
   localStorage.removeItem('access_token');
   localStorage.removeItem('refresh_token');
+};
+
+/** Verify email OTP after registration */
+export const verifyOtp = async (username, otp) => {
+  const response = await api.post('/verify-otp/', { username, otp });
+  return response.data;
+};
+
+/** Resend verification OTP */
+export const resendOtp = async (username) => {
+  const response = await api.post('/resend-otp/', { username });
+  return response.data;
+};
+
+/** Request a password reset OTP */
+export const forgotPassword = async (email) => {
+  const response = await api.post('/forgot-password/', { email });
+  return response.data;
+};
+
+/** Reset password using OTP */
+export const resetPassword = async (email, otp, new_password) => {
+  const response = await api.post('/reset-password/', { email, otp, new_password });
+  return response.data;
 };
 
 // -------------------------------------------------------
@@ -103,6 +138,65 @@ export const sendChatMessage = async (query, language = '', sessionId = '', sele
       "Failed to connect to the server. Make sure the backend is running."
     );
   }
+};
+
+/** Send a streaming chat message for instant real-time token reception */
+export const sendChatMessageStream = async (query, language = '', sessionId = '', selectedState = '', isVoice = false, onChunk, onComplete) => {
+  const token = localStorage.getItem('access_token');
+  const response = await fetch(`${API_BASE_URL}/chat/`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      query,
+      language,
+      session_id: sessionId,
+      state: selectedState,
+      is_voice: isVoice,
+      stream: true
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error('Streaming failed with status ' + response.status);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let fullText = '';
+  let activeSessionId = sessionId;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    const chunkStr = decoder.decode(value, { stream: true });
+    const lines = chunkStr.split('\n');
+
+    for (const line of lines) {
+      if (line.startsWith('data: [DONE]')) {
+        if (onComplete) onComplete(fullText, activeSessionId);
+        return { response: fullText, session_id: activeSessionId };
+      }
+      if (line.startsWith('data: ')) {
+        try {
+          const jsonStr = line.slice(6).trim();
+          if (!jsonStr) continue;
+          const parsed = JSON.parse(jsonStr);
+          if (parsed.session_id) activeSessionId = parsed.session_id;
+          if (parsed.token) {
+            fullText += parsed.token;
+            if (onChunk) onChunk(parsed.token, fullText, activeSessionId);
+          }
+        } catch (e) {}
+      }
+    }
+  }
+
+  if (onComplete) onComplete(fullText, activeSessionId);
+  return { response: fullText, session_id: activeSessionId };
 };
 
 /** Fetch chat history (requires JWT) */
@@ -149,21 +243,32 @@ export const checkEligibility = async (profileData) => {
   }
 };
 
-/** Synthesize speech using backend neural TTS (edge-tts) with max latency cap */
+/** Synthesize speech using backend neural TTS (edge-tts / gTTS) */
 export const fetchTextToSpeechAudio = async (text, language = 'en', timeoutMs = 10000) => {
   try {
-    const response = await api.post(
-      '/tts/',
-      { text, language },
-      { 
-        responseType: 'blob',
-        timeout: timeoutMs
-      }
-    );
-    const audioBlob = new Blob([response.data], { type: 'audio/mpeg' });
-    return URL.createObjectURL(audioBlob);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    const res = await fetch(`${API_BASE_URL}/tts/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, language }),
+      signal: controller.signal
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      console.warn('[TTS Fetch] Server returned status:', res.status);
+      return null;
+    }
+    const blob = await res.blob();
+    if (blob.size < 100) return null;
+    const url = URL.createObjectURL(blob);
+    console.log('[TTS Fetch] Success created blob URL:', url, 'size:', blob.size);
+    return url;
   } catch (error) {
-    console.warn("TTS API Error or timeout:", error.message);
+    console.warn("[TTS Fetch] Error:", error.message);
     return null;
   }
 };

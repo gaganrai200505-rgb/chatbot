@@ -1,20 +1,49 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { sendChatMessage, fetchTextToSpeechAudio } from './api';
+import { sendChatMessage, sendChatMessageStream, fetchTextToSpeechAudio } from './api';
 
 /* ─────────────────────────────────────────────────────────────────────────
  * Constants & Helpers
  * ───────────────────────────────────────────────────────────────────────── */
-const LANG_LOCALE = { auto: 'en-IN', en: 'en-IN', hi: 'hi-IN', kn: 'kn-IN' };
+const LANG_LOCALE = {
+  auto: 'en-IN',
+  en: 'en-IN',
+  hi: 'hi-IN',
+  kn: 'kn-IN',
+  ta: 'ta-IN',
+  te: 'te-IN',
+  mr: 'mr-IN',
+  bn: 'bn-IN',
+  gu: 'gu-IN',
+  ml: 'ml-IN',
+  pa: 'pa-IN'
+};
 
-const isMobileBrowser = () =>
-  /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
-    typeof navigator !== 'undefined' ? navigator.userAgent : ''
-  );
+const VOICE_LANGUAGES = [
+  { code: 'auto', name: 'Auto (Multilingual)', flag: '🌐' },
+  { code: 'en',   name: 'English',             flag: '🇮🇳' },
+  { code: 'hi',   name: 'हिंदी (Hindi)',         flag: '🇮🇳' },
+  { code: 'kn',   name: 'ಕನ್ನಡ (Kannada)',       flag: '🇮🇳' },
+  { code: 'ta',   name: 'தமிழ் (Tamil)',         flag: '🇮🇳' },
+  { code: 'te',   name: 'తెలుగు (Telugu)',       flag: '🇮🇳' },
+  { code: 'mr',   name: 'मराठी (Marathi)',       flag: '🇮🇳' },
+  { code: 'bn',   name: 'বাংলা (Bengali)',       flag: '🇮🇳' },
+  { code: 'gu',   name: 'ગુજરાતી (Gujarati)',     flag: '🇮🇳' },
+  { code: 'ml',   name: 'മലയാളം (Malayalam)',   flag: '🇮🇳' },
+  { code: 'pa',   name: 'ਪੰਜਾਬੀ (Punjabi)',       flag: '🇮🇳' },
+];
 
-/**
- * Truncate long AI response to first 2 concise sentences for ultra-fast TTS reply speed.
- * Full text remains visible in the UI transcript box.
- */
+const ChevronDownIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="6 9 12 15 18 9"/>
+  </svg>
+);
+
+const CheckIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="20 6 9 17 4 12"/>
+  </svg>
+);
+
 const prepareSpeechText = (text, lang) => {
   if (!text) return '';
   let clean = text
@@ -23,7 +52,6 @@ const prepareSpeechText = (text, lang) => {
     .replace(/\|/g, ' ')
     .replace(/#{1,6}\s?/g, '')
     .replace(/[*_~`]/g, '');
-
   if (lang === 'kn') {
     clean = clean.replace(/₹\s*([\d,]+)/g, '$1 ರೂಪಾಯಿ').replace(/%/g, ' ಶೇಕಡಾ');
   } else if (lang === 'hi') {
@@ -31,16 +59,8 @@ const prepareSpeechText = (text, lang) => {
   } else {
     clean = clean.replace(/₹\s*([\d,]+)/g, '$1 Rupees').replace(/%/g, ' percent');
   }
-
   clean = clean.replace(/\s+/g, ' ').trim();
-
-  // Extract first 2 sentences for fast speech response (max 280 chars)
-  const sentences = clean.match(/[^.!?]+[.!?]+/g);
-  if (sentences && sentences.length >= 1) {
-    const shortSpeech = sentences.slice(0, 2).join(' ').trim();
-    if (shortSpeech.length > 20) return shortSpeech;
-  }
-  return clean.slice(0, 280);
+  return clean;
 };
 
 const getRealisticVoice = (langCode) => {
@@ -48,11 +68,8 @@ const getRealisticVoice = (langCode) => {
   const voices = window.speechSynthesis.getVoices();
   if (!voices || !voices.length) return null;
   const prefix = (LANG_LOCALE[langCode] || 'en-IN').split('-')[0].toLowerCase();
-  const kws = [
-    'microsoft christopher online (natural)', 'microsoft guy online (natural)',
-    'microsoft prabhat', 'google us english male', 'google uk english male',
-    'rishi', 'george', 'natural'
-  ];
+  const kws = ['microsoft christopher online (natural)', 'microsoft guy online (natural)',
+    'microsoft prabhat', 'google us english male', 'google uk english male', 'rishi', 'george', 'natural'];
   for (const kw of kws) {
     const m = voices.find(v => v.name.toLowerCase().includes(kw) &&
       (v.lang.toLowerCase().startsWith(prefix) || prefix === 'en'));
@@ -64,473 +81,841 @@ const getRealisticVoice = (langCode) => {
 };
 
 /* ─────────────────────────────────────────────────────────────────────────
+ * EchoGuard — word-level Jaccard similarity + time-window suppression
+ *
+ * Suppresses microphone input that is likely the mic picking up the AI's
+ * own speaker output.  Uses two independent signals:
+ *   1. Jaccard word-overlap ≥ 0.55  (robust to partial transcriptions)
+ *   2. Time window: only active for 4 s after AI speech ends
+ * Both must be true to suppress, keeping false-positive rate near zero.
+ * ───────────────────────────────────────────────────────────────────────── */
+const echoWindowMs   = 4000;            // 4 s post-speech protection window
+let   echoWindowEnd  = 0;              // epoch ms when window expires
+let   lastSpokenText = '';             // normalized text of last AI utterance
+
+/** Call this immediately before audio playback starts */
+const setEchoSource = (text) => {
+  lastSpokenText = (text || '').toLowerCase().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  echoWindowEnd  = 0;               // reset; window opens when speech ENDS
+};
+
+/** Call this when audio playback finishes (open the guard window) */
+const openEchoWindow = () => {
+  echoWindowEnd = Date.now() + echoWindowMs;
+};
+
+/** Tokenize into a Set of unique words (length ≥ 2) */
+const tokenize = (str) => new Set(
+  str.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(w => w.length >= 2)
+);
+
+/**
+ * Jaccard similarity between two strings.
+ * Returns 0.0 – 1.0; values ≥ 0.55 are treated as an echo.
+ */
+const jaccardSimilarity = (a, b) => {
+  const setA = tokenize(a);
+  const setB = tokenize(b);
+  if (!setA.size || !setB.size) return 0;
+  let intersection = 0;
+  setA.forEach(w => { if (setB.has(w)) intersection++; });
+  return intersection / (setA.size + setB.size - intersection);
+};
+
+/**
+ * Returns true when `transcript` is almost certainly the AI's own voice
+ * leaking back into the microphone.
+ */
+const isEcho = (transcript) => {
+  if (!lastSpokenText || !transcript) return false;
+  if (Date.now() > echoWindowEnd) return false;   // outside protection window
+  const sim = jaccardSimilarity(lastSpokenText, transcript);
+  if (sim >= 0.55) {
+    console.log(`[EchoGuard] Suppressed (Jaccard=${sim.toFixed(2)}):`, transcript);
+    return true;
+  }
+  return false;
+};
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Voice Suggestions
+ * ───────────────────────────────────────────────────────────────────────── */
+const VOICE_SUGGESTIONS = {
+  en: ['Ayushman Bharat Card?', 'PM Kisan Status?', 'Ration Card?', 'Free Housing?'],
+  hi: ['आयुष्मान भारत कार्ड?', 'पीएम किसान स्थिति?', 'राशन कार्ड?'],
+  kn: ['ಆಯುಷ್ಮಾನ್ ಭಾರತ್?', 'ಪಿಎಂ ಕಿಸಾನ್?', 'ರಾಷನ್ ಕಾರ್ಡ್?']
+};
+
+/* ─────────────────────────────────────────────────────────────────────────
  * Icons
  * ───────────────────────────────────────────────────────────────────────── */
-const SendIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
-    stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+const GeminiStar = () => (
+  <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
+    <path fillRule="evenodd" clipRule="evenodd"
+      d="M12 0C12 6.627 6.627 12 0 12C6.627 12 12 17.373 12 24C12 17.373 17.373 12 24 12C17.373 12 12 6.627 12 0Z"
+      fill="url(#vs_grad)" />
+    <defs>
+      <linearGradient id="vs_grad" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+        <stop stopColor="#4285F4" />
+        <stop offset="0.4" stopColor="#9334E6" />
+        <stop offset="1" stopColor="#EA4335" />
+      </linearGradient>
+    </defs>
   </svg>
 );
+
+const MicIcon = () => (
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+    <line x1="12" y1="19" x2="12" y2="23"/>
+    <line x1="8" y1="23" x2="16" y2="23"/>
+  </svg>
+);
+
+const MicOffIcon = () => (
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="1" y1="1" x2="23" y2="23"/>
+    <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/>
+    <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/>
+    <line x1="12" y1="19" x2="12" y2="23"/>
+    <line x1="8" y1="23" x2="16" y2="23"/>
+  </svg>
+);
+
+const PhoneOffIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07"/>
+    <path d="M14.5 2.5a10 10 0 0 0-10 10"/>
+    <line x1="1" y1="1" x2="23" y2="23"/>
+  </svg>
+);
+
+const SendIcon = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="22" y1="2" x2="11" y2="13"/>
+    <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+  </svg>
+);
+
 const CloseIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
-    stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-    <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="18" y1="6" x2="6" y2="18"/>
+    <line x1="6" y1="6" x2="18" y2="18"/>
   </svg>
 );
 
 /* ─────────────────────────────────────────────────────────────────────────
- * SiriVoiceModal v4 — Rock-solid Sequential 2-Way Voice Agent
- *
- * Guaranteed Cycle:
- * LISTENING (Mic ON) ──[User speaks]──> THINKING (Mic OFF, API call)
- *       ▲                                        │
- *       │                                        ▼
- * LISTENING <──[300ms pause]── SPEAKING (TTS Audio output)
- *
- * Features:
- * - Bulletproof single-instance guard (`isListeningActive`) prevents
- *   recognition crashes or infinite restart loops.
- * - Concise speech extraction (first 2 sentences) for 10x faster TTS reply.
- * - Instant tap-to-barge-in: tap orb/transcript anytime while AI speaks
- *   to interrupt audio and talk immediately.
+ * ChatGPT Voice Style Minimalist Pulsing Halo Orb Component
+ * ───────────────────────────────────────────────────────────────────────── */
+const ChatGPTVoiceOrb = ({ mode, onClick }) => (
+  <div className={`chatgpt-voice-orb-wrapper mode-${mode}`} onClick={onClick}>
+    <div className="chatgpt-aura-glow" />
+    <div className="chatgpt-halo-pulse p1" />
+    <div className="chatgpt-halo-pulse p2" />
+    <div className="chatgpt-halo-pulse p3" />
+    
+    <div className="chatgpt-core-sphere">
+      <div className="chatgpt-inner-swirl" />
+    </div>
+
+    <div className="chatgpt-sound-ripples">
+      <span className="ripple r1" />
+      <span className="ripple r2" />
+      <span className="ripple r3" />
+    </div>
+  </div>
+);
+
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Main Component
  * ───────────────────────────────────────────────────────────────────────── */
 const SiriVoiceModal = ({
-  isOpen, onClose, language = 'en',
-  selectedState = '', activeSessionId = '',
-  onSessionStarted, onMessageSent
+  isOpen,
+  onClose,
+  language = 'auto',
+  onLanguageChange,
+  selectedState = '',
+  activeSessionId = '',
+  onSessionStarted,
+  onMessageSent,
+  username = ''
 }) => {
-  const [mode, setMode] = useState('idle'); // 'idle' | 'listening' | 'thinking' | 'speaking'
-  const [userText, setUserText] = useState('');
-  const [aiText, setAiText] = useState('');
+  const [currentLanguage, setCurrentLanguage] = useState(language || 'auto');
+  const [isLangMenuOpen, setIsLangMenuOpen]   = useState(false);
+
+  const [mode, setMode]           = useState('idle');
+  const [userText, setUserText]   = useState('');
+  const [interimText, setInterimText] = useState('');
+  const [aiText, setAiText]       = useState('');
+  const [historyLogs, setHistoryLogs] = useState([]);
+  const [isMuted, setIsMuted]     = useState(false);
   const [inputText, setInputText] = useState('');
   const [permError, setPermError] = useState(null);
-  const isMobile = isMobileBrowser();
 
-  /* Single-source-of-truth refs */
-  const recRef            = useRef(null);
-  const isListeningActive = useRef(false);
-  const audioRef          = useRef(new Audio());
-  const sessionIdRef      = useRef(activeSessionId);
-  const silenceTimer      = useRef(null);
-  const restartTimer      = useRef(null);
-  const watchdogTimer     = useRef(null);
-  const isOpenRef         = useRef(isOpen);
-
-  useEffect(() => { sessionIdRef.current = activeSessionId; }, [activeSessionId]);
-  useEffect(() => { isOpenRef.current = isOpen; }, [isOpen]);
-
-  /* Unlock mobile Safari/Chrome audio context on first touch */
+  // Track session changes to clear logs when starting a new chat
+  const prevSessionIdRef = useRef(activeSessionId);
   useEffect(() => {
-    let unlocked = false;
-    const unlock = () => {
-      if (unlocked) return;
-      unlocked = true;
-      const a = audioRef.current;
-      a.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
-      a.volume = 0;
-      a.play().catch(() => {});
-      if (window.speechSynthesis) {
-        const dummy = new SpeechSynthesisUtterance('');
-        window.speechSynthesis.speak(dummy);
-        window.speechSynthesis.cancel();
+    if (prevSessionIdRef.current !== activeSessionId) {
+      // Only clear logs if we switched from an existing session to a new one.
+      // If we went from '' to a new session (because we just started it), keep the logs.
+      if (prevSessionIdRef.current && prevSessionIdRef.current !== activeSessionId) {
+        setHistoryLogs([]);
+        setUserText('');
+        setAiText("Hey! I'm listening — ask me about any government scheme.");
       }
-    };
-    document.addEventListener('touchstart', unlock, { once: true, passive: true });
-    document.addEventListener('click', unlock, { once: true });
-    return () => {
-      document.removeEventListener('touchstart', unlock);
-      document.removeEventListener('click', unlock);
-    };
-  }, []);
-
-  /* Pre-warm WebSpeech voices */
-  useEffect(() => {
-    if (window.speechSynthesis) {
-      window.speechSynthesis.getVoices();
-      window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
+      prevSessionIdRef.current = activeSessionId;
     }
-  }, []);
+  }, [activeSessionId]);
 
-  /* ─────────────────────────────────────────────────────────────────────
-   * Stop All Audio Output
-   * ───────────────────────────────────────────────────────────────────── */
+  // Keep refs of current values to avoid stale closures in event listeners
+  const activeSessionIdRef = useRef(activeSessionId);
+  const currentLanguageRef = useRef(currentLanguage);
+  const selectedStateRef = useRef(selectedState);
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+    currentLanguageRef.current = currentLanguage;
+    selectedStateRef.current = selectedState;
+  }, [activeSessionId, currentLanguage, selectedState]);
+
+  // Refs
+  const recognitionRef    = useRef(null);
+  const isMutedRef        = useRef(false);
+  const currentUtterRef   = useRef(null);
+  const transcriptEndRef  = useRef(null);
+  // IMPORTANT: playbackAudioRef is for dynamic audio playback only (NOT a DOM element)
+  const playbackAudioRef  = useRef(null);
+  const isProcessingRef   = useRef(false);
+  const isSpeakingRef     = useRef(false);
+  const lastSpokenTextRef = useRef('');
+  const silenceTimerRef   = useRef(null);
+  const latestTranscriptRef = useRef('');
+  const startListeningRef = useRef(null);
+
+  useEffect(() => {
+    if (language) setCurrentLanguage(language);
+  }, [language]);
+
+  /* ── Stop audio playback completely ── */
   const stopAudio = useCallback(() => {
-    if (watchdogTimer.current) { clearTimeout(watchdogTimer.current); watchdogTimer.current = null; }
-    const a = audioRef.current;
-    try { a.pause(); a.src = ''; } catch (_) {}
-    a.onplay = null; a.onended = null; a.onerror = null;
-    try { window.speechSynthesis?.cancel(); } catch (_) {}
+    isSpeakingRef.current = false;
+    try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch {}
+    if (playbackAudioRef.current) {
+      try { playbackAudioRef.current.pause(); } catch {}
+      playbackAudioRef.current.onended = null;
+      playbackAudioRef.current.onerror = null;
+      playbackAudioRef.current = null;
+    }
+    currentUtterRef.current = null;
   }, []);
 
-  /* ─────────────────────────────────────────────────────────────────────
-   * Stop Speech Recognition Cleanly
-   * ───────────────────────────────────────────────────────────────────── */
+  /* ── Stop speech recognition cleanly ── */
   const stopRecognition = useCallback(() => {
-    if (silenceTimer.current) { clearTimeout(silenceTimer.current); silenceTimer.current = null; }
-    if (restartTimer.current) { clearTimeout(restartTimer.current); restartTimer.current = null; }
-    if (recRef.current) {
-      try { recRef.current.abort(); } catch (_) {}
-      recRef.current = null;
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
     }
-    isListeningActive.current = false;
+    if (recognitionRef.current) {
+      const rec = recognitionRef.current;
+      recognitionRef.current = null; // nullify BEFORE abort to prevent onend re-entry
+      try {
+        rec.onresult = null;
+        rec.onerror  = null;
+        rec.onend    = null;
+        rec.onstart  = null;
+        rec.abort();
+      } catch {}
+    }
   }, []);
 
-  /* ─────────────────────────────────────────────────────────────────────
-   * Start Speech Recognition (Gated & Protected)
-   * ───────────────────────────────────────────────────────────────────── */
-  const startListening = useCallback(() => {
-    if (!isOpenRef.current) return;
-    if (isListeningActive.current) return; // Prevent duplicate active instances!
-
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) {
-      setPermError('Speech recognition is not supported in this browser. Please type below.');
-      return;
-    }
-
-    stopRecognition();
-
-    try {
-      const rec = new SR();
-      rec.continuous = true;
-      rec.interimResults = true;
-      rec.lang = LANG_LOCALE[language] || 'en-IN';
-      rec.maxAlternatives = 1;
-
-      rec.onstart = () => {
-        isListeningActive.current = true;
-        setPermError(null);
-        setMode('listening');
-      };
-
-      rec.onresult = (e) => {
-        let interim = '', final = '';
-        for (let i = e.resultIndex; i < e.results.length; i++) {
-          const t = e.results[i][0].transcript;
-          if (e.results[i].isFinal) final += t;
-          else interim += t;
-        }
-        const spoken = (final || interim).trim();
-        if (!spoken) return;
-
-        setUserText(spoken);
-
-        if (silenceTimer.current) clearTimeout(silenceTimer.current);
-        const delay = final ? 350 : 750;
-        silenceTimer.current = setTimeout(() => {
-          if (spoken.length >= 2) {
-            handleQuery(spoken);
-          }
-        }, delay);
-      };
-
-      rec.onerror = (e) => {
-        isListeningActive.current = false;
-        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-          setPermError('Microphone blocked. Tap 🔒 in address bar to allow.');
-        } else if (e.error !== 'aborted' && e.error !== 'no-speech') {
-          console.warn('[Voice] SR error:', e.error);
-        }
-      };
-
-      rec.onend = () => {
-        recRef.current = null;
-        isListeningActive.current = false;
-        // Auto-restart if modal is still open and we are in listening mode
-        if (isOpenRef.current) {
-          restartTimer.current = setTimeout(() => {
-            if (isOpenRef.current && !isListeningActive.current) {
-              startListening();
-            }
-          }, 350);
-        }
-      };
-
-      recRef.current = rec;
-      rec.start();
-    } catch (err) {
-      isListeningActive.current = false;
-      console.warn('[Voice] start Exception:', err.message);
-    }
-  }, [language, stopRecognition]);
-
-  /* ─────────────────────────────────────────────────────────────────────
-   * Return to Listening State cleanly after TTS completes
-   * ───────────────────────────────────────────────────────────────────── */
-  const resumeListening = useCallback(() => {
-    if (watchdogTimer.current) { clearTimeout(watchdogTimer.current); watchdogTimer.current = null; }
-    if (!isOpenRef.current) return;
-
-    stopAudio();
-    stopRecognition();
-    setUserText('');
-    setMode('listening');
-
-    // Small delay ensures audio output hardware has released mic lock
-    restartTimer.current = setTimeout(() => {
-      if (isOpenRef.current && !isListeningActive.current) {
-        startListening();
-      }
-    }, 350);
-  }, [stopAudio, stopRecognition, startListening]);
-
-  /* ─────────────────────────────────────────────────────────────────────
-   * Speak Response via WebSpeech or Backend TTS
-   * ───────────────────────────────────────────────────────────────────── */
-  const speakResponse = useCallback(async (fullResponseText) => {
-    if (!isOpenRef.current) { resumeListening(); return; }
-
-    const speechText = prepareSpeechText(fullResponseText, language);
-    if (!speechText) { resumeListening(); return; }
-
-    stopRecognition(); // Mic OFF while speaking
-    setMode('speaking');
-
-    // 20s watchdog guarantees cycle never deadlocks
-    watchdogTimer.current = setTimeout(() => {
-      console.warn('[Voice Watchdog] TTS timeout, resuming listening');
-      resumeListening();
-    }, 20000);
-
-    /* ── Fast Path: WebSpeech (Instant 0ms latency) ── */
-    if (window.speechSynthesis) {
-      let started = false;
-      const u = new SpeechSynthesisUtterance(speechText);
-      u.lang = LANG_LOCALE[language] || 'en-IN';
-      u.rate = 1.05; // Slightly faster speaking rate for snappy responses
-      u.pitch = 1.0;
-      const v = getRealisticVoice(language);
-      if (v) u.voice = v;
-
-      u.onstart = () => {
-        started = true;
-        clearTimeout(fallbackTimer);
-      };
-      u.onend = () => { if (started) resumeListening(); };
-      u.onerror = () => { if (started) resumeListening(); };
-
-      window.speechSynthesis.speak(u);
-
-      // Fallback to backend TTS if WebSpeech blocked by browser autoplay policy
-      const fallbackTimer = setTimeout(async () => {
-        if (started) return;
-        window.speechSynthesis.cancel();
-
-        try {
-          const url = await fetchTextToSpeechAudio(speechText, language, 12000);
-          if (!isOpenRef.current || !url) { resumeListening(); return; }
-          const a = audioRef.current;
-          a.src = url; a.volume = 1;
-          a.onended = () => { URL.revokeObjectURL(url); resumeListening(); };
-          a.onerror = () => { URL.revokeObjectURL(url); resumeListening(); };
-          await a.play();
-        } catch (e) {
-          resumeListening();
-        }
-      }, 1800);
-
-      return;
-    }
-
-    /* ── Fallback Path: Backend Neural TTS ── */
-    try {
-      const url = await fetchTextToSpeechAudio(speechText, language, 12000);
-      if (!isOpenRef.current || !url) { resumeListening(); return; }
-      const a = audioRef.current;
-      a.src = url; a.volume = 1;
-      a.onended = () => { URL.revokeObjectURL(url); resumeListening(); };
-      a.onerror = () => { URL.revokeObjectURL(url); resumeListening(); };
-      await a.play();
-    } catch (e) {
-      resumeListening();
-    }
-  }, [language, stopRecognition, resumeListening]);
-
-  /* ─────────────────────────────────────────────────────────────────────
-   * Handle User Query (API Call)
-   * ───────────────────────────────────────────────────────────────────── */
-  const handleQuery = useCallback(async (question) => {
-    const q = question.trim();
-    if (!q || q.length < 2) return;
-
-    stopRecognition(); // Mic OFF while thinking
-    stopAudio();
-
-    setUserText(q);
-    setInputText('');
-    setMode('thinking');
-    setAiText('Just a sec…');
-
-    try {
-      const result = await sendChatMessage(
-        q, language, sessionIdRef.current || '', selectedState, true
-      );
-
-      if (!sessionIdRef.current && result.session_id) {
-        sessionIdRef.current = result.session_id;
-        onSessionStarted?.(result.session_id);
-      }
-      onMessageSent?.();
-
-      const response = result.response || "I couldn't find information on that scheme.";
-      setAiText(response);
-      if (!isOpenRef.current) return;
-      await speakResponse(response);
-    } catch (err) {
-      const msg = err.message || 'Server connection error.';
-      setAiText(msg);
-      await speakResponse(msg);
-    }
-  }, [language, selectedState, stopRecognition, stopAudio, speakResponse, onSessionStarted, onMessageSent]);
-
-  /* ─────────────────────────────────────────────────────────────────────
-   * Lifecycle & Modal Control
-   * ───────────────────────────────────────────────────────────────────── */
-  useEffect(() => {
-    if (!isOpen) {
-      stopRecognition();
-      stopAudio();
+  /* ── Speak the full AI answer via Edge-TTS, fallback to WebSpeech ── */
+  const speakAnswer = useCallback(async (text, lang) => {
+    if (!text || isMutedRef.current) {
       setMode('idle');
       return;
     }
 
-    setUserText('');
-    setInputText('');
-    setAiText("Hey! I'm listening — ask me about any government scheme.");
-    setPermError(null);
+    const cleanText = prepareSpeechText(text, lang);
+    if (!cleanText) {
+      setMode('idle');
+      if (startListeningRef.current) startListeningRef.current();
+      return;
+    }
 
-    // Prompt for mic permissions then launch listening session
-    if (navigator.mediaDevices?.getUserMedia) {
-      navigator.mediaDevices.getUserMedia({ audio: true })
-        .then(stream => {
-          stream.getTracks().forEach(t => t.stop());
-          startListening();
-        })
-        .catch(() => {
-          setPermError('Microphone permission required. Tap 🔒 in browser bar to allow access.');
-        });
+    // Stop recognition FIRST, then mark as speaking
+    stopRecognition();
+    isSpeakingRef.current = true;
+    setMode('speaking');
+    setEchoSource(cleanText);           // prime EchoGuard with what AI will say
+    console.log('[Voice] Speaking answer:', cleanText.slice(0, 60));
+
+    const onSpeechFinished = () => {
+      console.log('[Voice] Speech finished — restarting listener in 800ms');
+      openEchoWindow();                 // open 4 s suppression window NOW
+      currentUtterRef.current = null;
+      isSpeakingRef.current = false;
+      setTimeout(() => {
+        if (!isMutedRef.current && startListeningRef.current) {
+          startListeningRef.current();
+        } else {
+          setMode('idle');
+        }
+      }, 800);
+    };
+
+    // --- PRIMARY: Edge-TTS Neural Audio via backend ---
+    let ttsAudioUrl = null;
+    try {
+      ttsAudioUrl = await fetchTextToSpeechAudio(cleanText, lang, 10000);
+    } catch (e) {
+      ttsAudioUrl = null;
+    }
+
+    if (ttsAudioUrl && !isMutedRef.current) {
+      // Create a brand-new Audio object (never reuse DOM element)
+      const audio = new Audio();
+      playbackAudioRef.current = audio;
+      audio.volume = 1.0;
+      audio.src = ttsAudioUrl;
+
+      const cleanup = () => {
+        URL.revokeObjectURL(ttsAudioUrl);
+        if (playbackAudioRef.current === audio) playbackAudioRef.current = null;
+        onSpeechFinished();
+      };
+
+      audio.onended = cleanup;
+      audio.onerror = (err) => {
+        console.warn('[Voice] Audio element error:', err);
+        cleanup();
+      };
+
+      try {
+        await audio.play();
+        console.log('[Voice] Neural TTS audio playing ✓');
+        return; // success — wait for onended
+      } catch (playErr) {
+        console.warn('[Voice] audio.play() failed:', playErr.message);
+        URL.revokeObjectURL(ttsAudioUrl);
+        playbackAudioRef.current = null;
+        // Fall through to WebSpeech fallback below
+      }
+    }
+
+    // --- FALLBACK: WebSpeech API ---
+    if (window.speechSynthesis && !isMutedRef.current) {
+      try { window.speechSynthesis.cancel(); } catch {}
+
+      // Wait for voices to load (first call may have empty voices list)
+      const trySpeak = () => {
+        const utter = new SpeechSynthesisUtterance(cleanText);
+        utter.lang   = LANG_LOCALE[lang] || 'en-IN';
+        utter.rate   = 1.0;
+        utter.volume = 1.0;
+        const voice  = getRealisticVoice(lang);
+        if (voice) utter.voice = voice;
+        currentUtterRef.current = utter;
+        utter.onend   = onSpeechFinished;
+        utter.onerror = onSpeechFinished;
+        window.speechSynthesis.speak(utter);
+      };
+
+      const voices = window.speechSynthesis.getVoices();
+      if (voices && voices.length > 0) {
+        trySpeak();
+      } else {
+        window.speechSynthesis.onvoiceschanged = () => {
+          window.speechSynthesis.onvoiceschanged = null;
+          trySpeak();
+        };
+        // Safety: if onvoiceschanged never fires, speak with default
+        setTimeout(() => {
+          if (isSpeakingRef.current && !currentUtterRef.current) trySpeak();
+        }, 500);
+      }
     } else {
+      onSpeechFinished();
+    }
+  }, [stopRecognition]);
+
+  /* ── Handle a user query ── */
+  const handleQuery = useCallback(async (query) => {
+    const q = (query || '').trim();
+    if (!q || isProcessingRef.current) return;
+
+    isProcessingRef.current = true;
+    stopAudio();
+    stopRecognition();
+    setMode('thinking');
+    setUserText(q);
+    setAiText('');
+    setInterimText('');
+
+    try {
+      await sendChatMessageStream(
+        q,
+        currentLanguageRef.current,
+        activeSessionIdRef.current,
+        selectedStateRef.current,
+        true,
+        (chunkToken, accText, newSessionId) => {
+          setAiText(accText);
+          if (newSessionId && onSessionStarted) onSessionStarted(newSessionId);
+        },
+        (finalText, finalSessionId) => {
+          setAiText(finalText);
+          setHistoryLogs(prev => [...prev, { user: q, ai: finalText }]);
+          if (onMessageSent) onMessageSent();
+          isProcessingRef.current = false;
+
+          if (finalText && !isMutedRef.current) {
+            speakAnswer(finalText, currentLanguageRef.current);
+          } else {
+            setMode('idle');
+            if (!isMutedRef.current && startListeningRef.current) {
+              startListeningRef.current();
+            }
+          }
+        }
+      );
+    } catch (err) {
+      console.warn('[Voice] Stream failed, trying non-stream:', err.message);
+      try {
+        const res = await sendChatMessage(q, currentLanguageRef.current, activeSessionIdRef.current, selectedStateRef.current, true);
+        const reply = res?.response || res?.answer || 'Sorry, I could not get information about that.';
+        if (res?.session_id && onSessionStarted) onSessionStarted(res.session_id);
+        if (onMessageSent) onMessageSent();
+        setAiText(reply);
+        setHistoryLogs(prev => [...prev, { user: q, ai: reply }]);
+        isProcessingRef.current = false;
+        if (!isMutedRef.current && reply) {
+          speakAnswer(reply, currentLanguageRef.current);
+        } else {
+          setMode('idle');
+        }
+      } catch (fallbackErr) {
+        const errReply = 'Something went wrong. Please try again.';
+        setAiText(errReply);
+        setHistoryLogs(prev => [...prev, { user: q, ai: errReply }]);
+        isProcessingRef.current = false;
+        setMode('idle');
+      }
+    }
+  }, [speakAnswer, stopAudio, stopRecognition, onSessionStarted, onMessageSent]);
+
+  /* ── Start speech recognition ── */
+  const startListening = useCallback(() => {
+    // Don't start listening while speaking or processing
+    if (isSpeakingRef.current || isProcessingRef.current || isMutedRef.current) return;
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setPermError('Speech recognition not supported in this browser.');
+      return;
+    }
+
+    // Abort previous recognition if any
+    stopRecognition();
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous      = true;
+    recognition.interimResults  = true;
+    recognition.lang            = LANG_LOCALE[currentLanguageRef.current] || 'en-IN';
+    recognition.maxAlternatives = 1;
+
+    latestTranscriptRef.current = '';
+
+    recognition.onstart = () => {
+      console.log('[Voice] Microphone started — listening');
+      setMode('listening');
+    };
+
+    recognition.onresult = (e) => {
+      // Block input if AI is speaking or processing
+      if (isSpeakingRef.current || isProcessingRef.current) return;
+
+      let finalT  = '';
+      let interimT = '';
+      for (let i = 0; i < e.results.length; ++i) {
+        if (e.results[i].isFinal) finalT   += e.results[i][0].transcript;
+        else                       interimT += e.results[i][0].transcript;
+      }
+
+      const fullText = (finalT || interimT).trim();
+      if (fullText) {
+        latestTranscriptRef.current = fullText;
+        setInterimText(fullText);
+
+        // Auto-submit after 800ms of silence
+        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = setTimeout(() => {
+          const pending = latestTranscriptRef.current.trim();
+          if (!pending || isProcessingRef.current || isSpeakingRef.current) return;
+
+          // EchoGuard — Jaccard similarity + time-window
+          if (isEcho(pending)) {
+            latestTranscriptRef.current = '';
+            setInterimText('');
+            return;
+          }
+
+          latestTranscriptRef.current = '';
+          setInterimText('');
+          stopRecognition();
+          handleQuery(pending);
+        }, 800);
+      }
+
+      // Also submit immediately on final result
+      if (finalT.trim()) {
+        const transcript = finalT.trim();
+
+        // EchoGuard — Jaccard similarity + time-window
+        if (isEcho(transcript)) {
+          latestTranscriptRef.current = '';
+          setInterimText('');
+          return;
+        }
+
+        latestTranscriptRef.current = '';
+        setInterimText('');
+        stopRecognition();
+        handleQuery(transcript);
+      }
+    };
+
+    recognition.onend = () => {
+      const remaining = latestTranscriptRef.current.trim();
+      setInterimText('');
+      latestTranscriptRef.current = '';
+
+      if (remaining && !isProcessingRef.current && !isSpeakingRef.current) {
+        if (isEcho(remaining)) {
+          // suppressed — do nothing
+        } else {
+          handleQuery(remaining);
+          return;
+        }
+      }
+
+      if (!isProcessingRef.current && !isMutedRef.current && !isSpeakingRef.current) {
+        setMode('idle');
+      }
+    };
+
+    recognition.onerror = (e) => {
+      setInterimText('');
+      if (e.error !== 'no-speech' && e.error !== 'aborted') {
+        console.warn('[Voice] Recognition error:', e.error);
+      }
+      if (!isSpeakingRef.current && !isProcessingRef.current) {
+        setMode('idle');
+      }
+    };
+
+    recognitionRef.current = recognition;
+
+    // startListeningRef is used by speakAnswer's onSpeechFinished to restart mic
+    startListeningRef.current = () => {
+      if (isSpeakingRef.current || isProcessingRef.current || isMutedRef.current) return;
+      // Create a fresh recognition instance each time to avoid Chrome's one-shot limit
       startListening();
+    };
+
+    try {
+      recognition.start();
+    } catch (err) {
+      console.warn('[Voice] Could not start recognition:', err.message);
+    }
+  }, [handleQuery, stopRecognition]);
+
+  /* ── Unlock browser audio context on first user gesture ── */
+  const unlockAudioContext = useCallback(() => {
+    try {
+      const silentAudio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
+      silentAudio.volume = 0.001;
+      silentAudio.play().then(() => silentAudio.pause()).catch(() => {});
+    } catch {}
+    try {
+      if (window.speechSynthesis) {
+        if (window.speechSynthesis.paused) window.speechSynthesis.resume();
+        const u = new SpeechSynthesisUtterance(' ');
+        u.volume = 0.001;
+        window.speechSynthesis.speak(u);
+      }
+    } catch {}
+  }, []);
+
+  /* ── Lifecycle: open/close ── */
+  useEffect(() => {
+    if (!isOpen) return;
+
+    unlockAudioContext();
+    isProcessingRef.current  = false;
+    isSpeakingRef.current    = false;
+    isMutedRef.current       = false;
+    setIsMuted(false);
+    setMode('idle');
+    setUserText('');
+    setPermError(null);
+    latestTranscriptRef.current = '';
+    setEchoSource('');
+
+    const displayName = username ? username.split('@')[0].split('.')[0] : '';
+    const nameCap = displayName ? displayName.charAt(0).toUpperCase() + displayName.slice(1) : '';
+    const greetingText = nameCap
+      ? `Hey ${nameCap}! I'm listening — ask me about any government scheme.`
+      : "Hey! I'm listening — ask me about any government scheme.";
+
+    setAiText(greetingText);
+
+    if (!activeSessionId) {
+      setHistoryLogs([]);
+      // Speak the initial greeting automatically
+      setTimeout(() => {
+        if (!isMutedRef.current) {
+          speakAnswer(greetingText, currentLanguage);
+        }
+      }, 400); // Wait for modal animation to mount
+    } else {
+      const tryStart = () => startListening();
+
+      if (navigator.mediaDevices?.getUserMedia) {
+        navigator.mediaDevices.getUserMedia({ audio: true })
+          .then(stream => { stream.getTracks().forEach(t => t.stop()); tryStart(); })
+          .catch(() => setPermError('Microphone permission required. Tap 🔒 in browser bar to allow.'));
+      } else {
+        tryStart();
+      }
     }
 
     return () => {
       stopRecognition();
       stopAudio();
     };
-  }, [isOpen, startListening, stopRecognition, stopAudio]);
+  }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ESC key listener */
+  /* ── Keyboard shortcut: Escape ── */
   useEffect(() => {
     const handle = (e) => { if (e.key === 'Escape' && isOpen) onClose(); };
     window.addEventListener('keydown', handle);
     return () => window.removeEventListener('keydown', handle);
   }, [isOpen, onClose]);
 
-  /* Typed input submit */
+  /* ── Handlers ── */
+  const handleSelectLang = (code) => {
+    unlockAudioContext();
+    setCurrentLanguage(code);
+    setIsLangMenuOpen(false);
+    if (onLanguageChange) onLanguageChange(code);
+    stopAudio();
+    stopRecognition();
+    setTimeout(() => {
+      if (!isMutedRef.current) startListening();
+    }, 200);
+  };
+
   const handleTypedSubmit = (e) => {
     e.preventDefault();
+    unlockAudioContext();
     const q = inputText.trim();
     if (!q) return;
+    setInputText('');
     handleQuery(q);
   };
 
-  /* Orb click: Barge-In (Interrupt AI speech) or start listening */
   const handleOrbClick = () => {
-    if (mode === 'speaking') {
-      // Instant Barge-In: Cut speech output and open mic immediately
+    unlockAudioContext();
+    if (isSpeakingRef.current) {
+      // Tap orb to interrupt speech
       stopAudio();
-      resumeListening();
-    } else if (mode === 'listening') {
-      // Restart listening if needed
+      setMode('idle');
+      setTimeout(() => {
+        if (!isMutedRef.current) startListening();
+      }, 300);
+    } else {
+      isProcessingRef.current = false;
+      if (isMutedRef.current) {
+        isMutedRef.current = false;
+        setIsMuted(false);
+      }
       startListening();
-    } else if (mode === 'idle') {
+    }
+  };
+
+  const toggleMute = () => {
+    if (isMuted) {
+      setIsMuted(false);
+      isMutedRef.current = false;
+      stopAudio();
       startListening();
+    } else {
+      setIsMuted(true);
+      isMutedRef.current = true;
+      stopAudio();
+      stopRecognition();
+      setMode('idle');
     }
   };
 
   if (!isOpen) return null;
 
-  const statusLabel = {
-    listening: '🎙️ Listening… (speak now)',
-    thinking:  '💭 Thinking…',
-    speaking:  '🔊 Speaking — tap orb to interrupt & talk',
-    idle:      'Tap orb to start',
-  }[mode] ?? '';
+  const STATUS = {
+    listening: { label: 'Listening',  hint: 'Speak now…' },
+    thinking:  { label: 'Thinking',   hint: 'Processing your query…' },
+    speaking:  { label: 'Speaking',   hint: 'Tap orb to interrupt' },
+    idle:      { label: isMuted ? 'Muted' : 'Ready', hint: isMuted ? 'Tap unmute to speak' : 'Tap mic or speak' },
+  };
+
+  const selectedLangObj = VOICE_LANGUAGES.find(l => l.code === currentLanguage) || VOICE_LANGUAGES[0];
 
   return (
-    <div className="siri-modal-backdrop" onClick={onClose}>
-      <div className="siri-modal-card" onClick={e => e.stopPropagation()}>
+    <div className="gemini-live-screen" onClick={() => { setIsLangMenuOpen(false); onClose(); }}>
+      <div className="gemini-live-container" onClick={e => e.stopPropagation()}>
 
-        {/* Header */}
-        <div className="siri-header">
-          <div className="siri-badge">
-            <span className="siri-dot" />
-            <span>JanSeva AI — Voice Mode ({language.toUpperCase()})</span>
+        {/* ── Top Navigation Bar ── */}
+        <header className="gemini-live-header">
+          <div className="gemini-live-brand">
+            <GeminiStar />
+            <div className="gemini-live-brand-text">
+              <span className="gemini-live-title">JanSeva Live</span>
+              <span className="gemini-live-sub">Voice AI Companion</span>
+            </div>
           </div>
-          <button className="siri-close-btn" onClick={onClose} title="End call (Esc)">
+
+          {/* Voice Language Selector Dropdown */}
+          <div className="voice-lang-dropdown-wrapper" onClick={e => e.stopPropagation()}>
+            <button
+              className="voice-lang-select-btn"
+              onClick={(e) => { e.stopPropagation(); setIsLangMenuOpen(o => !o); }}
+              aria-label="Select Voice Assistant Language"
+            >
+              <span className="lang-flag">{selectedLangObj.flag}</span>
+              <span className="lang-name">{selectedLangObj.name}</span>
+              <ChevronDownIcon />
+            </button>
+
+            {isLangMenuOpen && (
+              <div className="voice-lang-menu" onClick={e => e.stopPropagation()}>
+                {VOICE_LANGUAGES.map((l) => (
+                  <button
+                    key={l.code}
+                    className={`voice-lang-menu-item ${currentLanguage === l.code ? 'active' : ''}`}
+                    onClick={(e) => { e.stopPropagation(); handleSelectLang(l.code); }}
+                  >
+                    <span className="item-flag">{l.flag}</span>
+                    <span className="item-name">{l.name}</span>
+                    {currentLanguage === l.code && <CheckIcon />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="gemini-live-status-badge" data-mode={mode}>
+            <span className="gemini-live-dot" />
+            <span className="gemini-live-status-text">{STATUS[mode].label}</span>
+          </div>
+
+          <button className="gemini-live-close-btn" onClick={onClose} aria-label="Close JanSeva Live">
             <CloseIcon />
           </button>
-        </div>
+        </header>
 
-        {/* Animated Orb / Tap-to-Barge-In */}
-        <div
-          className="siri-orb-container"
-          onClick={handleOrbClick}
-          title={mode === 'speaking' ? 'Tap to interrupt speech' : 'Listening'}
-        >
-          <div className={`siri-orb-glow ${mode}`} />
-          <div className={`siri-orb ${mode}`}>
-            <div className="siri-orb-core" />
-            <div className="siri-orb-ring ring-1" />
-            <div className="siri-orb-ring ring-2" />
-            <div className="siri-orb-ring ring-3" />
-          </div>
-        </div>
+        {/* ── Main Center Stage (ChatGPT Voice Style Pulsing Halo Orb) ── */}
+        <main className="gemini-live-stage">
+          <ChatGPTVoiceOrb mode={mode} onClick={handleOrbClick} />
+          
+          <div className="gemini-live-hint-text">{STATUS[mode].hint}</div>
 
-        {/* Status label */}
-        <div className="siri-status-text">{statusLabel}</div>
-
-        {/* Permission error */}
-        {permError && <div className="siri-error-banner">⚠️ {permError}</div>}
-
-        {/* Live transcript box */}
-        <div className="siri-transcript-box" onClick={handleOrbClick}>
-          {userText && (
-            <div className="siri-user-bubble">
-              <span className="label">You:</span> "{userText}"
+          {/* Quick Voice Suggestion Chips */}
+          {(mode === 'idle' || mode === 'listening') && historyLogs.length === 0 && !userText && !interimText && (
+            <div className="voice-suggestion-chips">
+              {(VOICE_SUGGESTIONS[currentLanguage] || VOICE_SUGGESTIONS['en']).map((suggestion, idx) => (
+                <button
+                  key={idx}
+                  className="voice-chip-btn"
+                  onClick={() => { unlockAudioContext(); handleQuery(suggestion); }}
+                >
+                  <span className="chip-icon">⚡</span>
+                  <span>{suggestion}</span>
+                </button>
+              ))}
             </div>
           )}
-          {aiText && (
-            <div className="siri-ai-bubble">
-              <span className="label">JanSeva AI:</span> {aiText}
+
+          {/* ── Persistent Live Transcript & Response Display Card ── */}
+          {(historyLogs.length > 0 || userText || interimText || aiText) && (
+            <div className="gemini-live-captions">
+              {historyLogs.map((log, idx) => (
+                <React.Fragment key={idx}>
+                  <div className="caption-bubble user-caption">
+                    <span className="caption-speaker">You</span>
+                    <span className="caption-text">{log.user}</span>
+                  </div>
+                  <div className="caption-bubble ai-caption">
+                    <span className="caption-speaker">JanSeva AI</span>
+                    <span className="caption-text">{log.ai}</span>
+                  </div>
+                </React.Fragment>
+              ))}
+
+              {/* Active Live Turn */}
+              {mode === 'thinking' && !aiText && (
+                <div className="caption-bubble user-caption">
+                  <span className="caption-speaker">You</span>
+                  <span className="caption-text">{userText}</span>
+                </div>
+              )}
+              {interimText && (
+                <div className="caption-bubble user-caption">
+                  <span className="caption-speaker">You</span>
+                  <span className="caption-text">
+                    {interimText}
+                    <span className="live-typing-indicator">…</span>
+                  </span>
+                </div>
+              )}
+              {aiText && (!historyLogs.length || historyLogs[historyLogs.length - 1]?.ai !== aiText) && (
+                <div className="caption-bubble ai-caption">
+                  <span className="caption-speaker">JanSeva AI</span>
+                  <span className="caption-text">{aiText}</span>
+                </div>
+              )}
+              <div ref={transcriptEndRef} />
             </div>
           )}
-        </div>
 
-        {/* Typed fallback input */}
-        <form className="siri-input-form" onSubmit={handleTypedSubmit}>
-          <input
-            type="text"
-            className="siri-text-input"
-            placeholder="Or type your question here…"
-            value={inputText}
-            onChange={e => setInputText(e.target.value)}
-          />
-          <button type="submit" className="siri-send-btn" disabled={!inputText.trim()}>
-            <SendIcon />
-          </button>
-        </form>
+          {/* ── Permission Error ── */}
+          {permError && <div className="gemini-live-error">⚠️ {permError}</div>}
+        </main>
 
-        {/* End call */}
-        <div className="siri-actions">
-          <button className="siri-action-btn end-call" onClick={onClose}>
-            End Voice Call
+        {/* ── Bottom Floating Control Toolbar ── */}
+        <footer className="gemini-live-toolbar">
+          <button
+            className={`toolbar-btn mute-btn ${isMuted ? 'is-muted' : ''}`}
+            onClick={toggleMute}
+            aria-label={isMuted ? 'Unmute microphone' : 'Mute microphone'}
+          >
+            {isMuted ? <MicOffIcon /> : <MicIcon />}
+            <span>{isMuted ? 'Unmute' : 'Mute'}</span>
           </button>
-        </div>
+          <button className="toolbar-btn end-btn" onClick={onClose} aria-label="End session">
+            <PhoneOffIcon />
+            <span>End Live</span>
+          </button>
+        </footer>
+
       </div>
     </div>
   );
+
 };
 
 export default SiriVoiceModal;

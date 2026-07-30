@@ -4,12 +4,21 @@ import { sendChatMessage, fetchChatHistory, fetchTextToSpeechAudio } from './api
 /* ──────────────────────────────────────────────────────────────────────────
  * Icon helpers
  * ────────────────────────────────────────────────────────────────────────── */
-const BotIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
-    stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+const GeminiSparkleIcon = ({ size = 20 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path fillRule="evenodd" clipRule="evenodd" d="M12 0C12 6.62742 6.62742 12 0 12C6.62742 12 12 17.3726 12 24C12 17.3726 17.3726 12 24 12C17.3726 12 12 6.62742 12 0Z" fill="url(#gemini_sparkle_grad_chat)" />
+    <defs>
+      <linearGradient id="gemini_sparkle_grad_chat" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+        <stop stopColor="#4285F4" />
+        <stop offset="0.33" stopColor="#9334E6" />
+        <stop offset="0.66" stopColor="#EA4335" />
+        <stop offset="1" stopColor="#24C1E0" />
+      </linearGradient>
+    </defs>
   </svg>
 );
+
+const BotIcon = () => <GeminiSparkleIcon size={20} />;
 
 const SendIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
@@ -276,10 +285,10 @@ const parseLinksAndBold = (str) => {
     if (match[1] && match[2]) {
       // Markdown link: [label](url)
       const label = match[1];
-      let url = match[2];
+      let url = match[2].trim().replace(/[.,;:]+$/, '');
       if (!url.startsWith('http')) url = 'https://' + url;
 
-      const isPortalBtn = url.includes('.gov.in') || label.toLowerCase().includes('apply') || label.toLowerCase().includes('portal') || label.toLowerCase().includes('official');
+      const isPortalBtn = url.includes('.gov.in') || url.includes('.nic.in') || url.includes('.in') || label.toLowerCase().includes('apply') || label.toLowerCase().includes('portal') || label.toLowerCase().includes('official') || label.toLowerCase().includes('register');
 
       if (isPortalBtn) {
         tokens.push(
@@ -309,9 +318,9 @@ const parseLinksAndBold = (str) => {
         );
       }
     } else if (match[3]) {
-      // Plain URL match (e.g. pmkisan.gov.in)
-      let url = match[3];
-      const displayUrl = url;
+      // Plain URL match (e.g. pmkisan.gov.in or https://beneficiary.nha.gov.in)
+      let url = match[3].trim().replace(/[.,;:]+$/, '');
+      const displayDomain = url.replace(/^https?:\/\//, '').split('/')[0];
       if (!url.startsWith('http')) url = 'https://' + url;
 
       tokens.push(
@@ -322,8 +331,8 @@ const parseLinksAndBold = (str) => {
           rel="noopener noreferrer"
           className="portal-cta-button"
         >
-          <span className="portal-cta-icon">🌐</span>
-          <span className="portal-cta-label">{displayUrl}</span>
+          <span className="portal-cta-icon">🏛️</span>
+          <span className="portal-cta-label">Apply on {displayDomain}</span>
           <span className="portal-cta-badge">Official Portal ↗</span>
         </a>
       );
@@ -505,14 +514,16 @@ const ChatUI = ({ sessionId, initialMessages = [], onSessionStarted, language, s
       {/* ── Chat messages OR welcome state ── */}
       <div className="chat-area">
         {!hasMessages ? (
-          /* Welcome / empty state */
+          /* Welcome / empty state — Google Gemini Style */
           <div className="welcome-state">
-            <div className="welcome-icon">
-              <BotIcon />
+            <div className="welcome-icon gemini-sparkle-hero">
+              <GeminiSparkleIcon size={44} />
             </div>
-            <h2 className="welcome-heading">JanSeva AI</h2>
+            <h2 className="welcome-heading">
+              <span className="gemini-gradient-text">Hello, {username || 'Citizen'}</span>
+            </h2>
             <p className="welcome-sub">
-              Ask about PM Kisan, Ayushman Bharat, Ration Card, and other citizen services.
+              How can I help you discover Indian government schemes today?
             </p>
 
             <div className="suggestions-grid">

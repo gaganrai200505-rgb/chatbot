@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './AuthContext';
 import AuthForms from './AuthForms';
@@ -7,6 +7,20 @@ import { fetchChatHistory, deleteChatSession, updateChatSession } from './api';
 
 import EligibilityModal from './EligibilityModal';
 import SiriVoiceModal from './SiriVoiceModal';
+
+const GeminiSparkleIcon = ({ size = 20 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path fillRule="evenodd" clipRule="evenodd" d="M12 0C12 6.62742 6.62742 12 0 12C6.62742 12 12 17.3726 12 24C12 17.3726 17.3726 12 24 12C17.3726 12 12 6.62742 12 0Z" fill="url(#gemini_sparkle_grad)" />
+    <defs>
+      <linearGradient id="gemini_sparkle_grad" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+        <stop stopColor="#4285F4" />
+        <stop offset="0.33" stopColor="#9334E6" />
+        <stop offset="0.66" stopColor="#EA4335" />
+        <stop offset="1" stopColor="#24C1E0" />
+      </linearGradient>
+    </defs>
+  </svg>
+);
 
 const MicIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
@@ -32,6 +46,133 @@ const MapPinIcon = () => (
     <circle cx="12" cy="10" r="3"/>
   </svg>
 );
+
+const ChevronDownIcon = ({ className = '' }) => (
+  <svg className={className} xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="6 9 12 15 18 9"/>
+  </svg>
+);
+
+const SearchIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="11" cy="11" r="8"/>
+    <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+  </svg>
+);
+
+const CheckIconSmall = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="20 6 9 17 4 12"/>
+  </svg>
+);
+
+const CustomDropdown = ({ options, value, onChange, icon, title, searchable = false, isState = false }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const dropdownRef = useRef(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const filteredOptions = options.filter(opt => {
+    const text = typeof opt === 'string' ? opt : opt.label;
+    return text.toLowerCase().includes(search.toLowerCase());
+  });
+
+  const selectedLabel = typeof options[0] === 'string'
+    ? value
+    : (options.find(o => o.value === value)?.label || value);
+
+  const shortLabel = isState && selectedLabel.length > 12
+    ? selectedLabel.split(' ').slice(0, 2).join(' ')
+    : selectedLabel;
+
+  return (
+    <div className={`custom-dropdown-container ${isState ? 'state-dropdown' : ''}`} ref={dropdownRef} title={title}>
+      <button
+        type="button"
+        className={`custom-dropdown-trigger ${isOpen ? 'active' : ''}`}
+        onClick={() => setIsOpen(!isOpen)}
+      >
+        {icon}
+        <span className="dropdown-selected-text desktop-label">{selectedLabel}</span>
+        <span className="dropdown-selected-text mobile-label">{shortLabel}</span>
+        <ChevronDownIcon className={`chevron-icon ${isOpen ? 'open' : ''}`} />
+      </button>
+
+      {isOpen && (
+        <>
+          {/* Mobile dimmed backdrop */}
+          <div className="dropdown-mobile-backdrop" onClick={() => { setIsOpen(false); setSearch(''); }} />
+
+          <div className="custom-dropdown-menu">
+            {/* Mobile sheet header with drag handle */}
+            <div className="mobile-sheet-header">
+              <div className="mobile-sheet-drag-handle" />
+              <div className="mobile-sheet-title">
+                {isState ? '📍 Select State / Region' : '🌐 Select Language'}
+              </div>
+            </div>
+
+            {searchable && (
+              <div className="dropdown-search-box">
+                <SearchIcon />
+                <input
+                  type="text"
+                  className="dropdown-search-input"
+                  placeholder="Search state..."
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  autoFocus
+                  onClick={e => e.stopPropagation()}
+                />
+                {search && (
+                  <button className="clear-search-btn" onClick={() => setSearch('')}>✕</button>
+                )}
+              </div>
+            )}
+
+            <div className="dropdown-options-list">
+            {filteredOptions.map((opt) => {
+              const val = typeof opt === 'string' ? opt : opt.value;
+              const lbl = typeof opt === 'string' ? opt : opt.label;
+              const isSelected = val === value;
+
+              return (
+                <div
+                  key={val}
+                  className={`dropdown-option-item ${isSelected ? 'selected' : ''}`}
+                  onClick={() => {
+                    onChange(val);
+                    setIsOpen(false);
+                    setSearch('');
+                  }}
+                >
+                  <span className="option-label">{lbl}</span>
+                  {isSelected && <CheckIconSmall />}
+                </div>
+              );
+            })}
+            {filteredOptions.length === 0 && (
+              <div className="dropdown-no-results">No match found</div>
+            )}
+          </div>
+        </div>
+        </>
+      )}
+    </div>
+  );
+};
 
 const INDIAN_STATES_AND_UTS = [
   "All India / Central Govt",
@@ -286,12 +427,11 @@ const ChatPage = () => {
 
   return (
     <div className="app-shell">
-      {/* ── SIDEBAR ── */}
       <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
         <div className="sidebar-top">
           <div className="sidebar-brandmark">
             <div className="sidebar-logo-icon">
-              <BotLogoIcon />
+              <GeminiSparkleIcon size={22} />
             </div>
             <span className="sidebar-app-name">JanSeva AI</span>
           </div>
@@ -428,7 +568,7 @@ const ChatPage = () => {
             >
               <MenuIcon />
             </button>
-            <span className="model-badge">Government Schemes AI</span>
+            <span className="model-badge">JanSeva AI</span>
           </div>
 
           <div className="topbar-right">
@@ -443,39 +583,38 @@ const ChatPage = () => {
             </button>
 
             {/* State Filter Selector */}
-            <div className="lang-selector state-selector" title="Filter schemes by State or Central Govt">
-              <MapPinIcon />
-              <select
-                id="state-select"
-                className="lang-select"
-                value={selectedState}
-                onChange={(e) => setSelectedState(e.target.value)}
-                aria-label="Filter schemes by State"
-              >
-                {INDIAN_STATES_AND_UTS.map((st) => (
-                  <option key={st} value={st}>
-                    {st}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <CustomDropdown
+              options={INDIAN_STATES_AND_UTS}
+              value={selectedState}
+              onChange={setSelectedState}
+              icon={<MapPinIcon />}
+              title="Filter schemes by State or Central Govt"
+              searchable={true}
+              isState={true}
+            />
 
             {/* Language Selector */}
-            <div className="lang-selector">
-              <GlobeIcon />
-              <select
-                id="lang-select"
-                className="lang-select"
-                value={language}
-                onChange={(e) => setLanguage(e.target.value)}
-                aria-label="Select language"
-              >
-                <option value="auto">Auto-Detect</option>
-                <option value="en">English</option>
-                <option value="hi">हिंदी</option>
-                <option value="kn">ಕನ್ನಡ</option>
-              </select>
-            </div>
+            <CustomDropdown
+              options={[
+                { value: 'auto', label: 'Auto (Multilingual)' },
+                { value: 'en',   label: 'English' },
+                { value: 'hi',   label: 'हिंदी (Hindi)' },
+                { value: 'kn',   label: 'ಕನ್ನಡ (Kannada)' },
+                { value: 'ta',   label: 'தமிழ் (Tamil)' },
+                { value: 'te',   label: 'తెలుగు (Telugu)' },
+                { value: 'mr',   label: 'मराठी (Marathi)' },
+                { value: 'bn',   label: 'বাংলা (Bengali)' },
+                { value: 'gu',   label: 'ગુજરાતી (Gujarati)' },
+                { value: 'ml',   label: 'മലയാളം (Malayalam)' },
+                { value: 'pa',   label: 'ਪੰਜਾਬੀ (Punjabi)' },
+              ]}
+              value={language}
+              onChange={setLanguage}
+              icon={<GlobeIcon />}
+              title="Select language"
+              searchable={false}
+              isState={false}
+            />
           </div>
         </header>
 
@@ -496,10 +635,12 @@ const ChatPage = () => {
           isOpen={isSiriOpen}
           onClose={() => setIsSiriOpen(false)}
           language={language}
+          onLanguageChange={(newLang) => setLanguage(newLang)}
           selectedState={selectedState}
           activeSessionId={activeSessionId}
           onSessionStarted={(newId) => setActiveSessionId(newId)}
           onMessageSent={handleMessageSent}
+          username={user?.username}
         />
       </main>
     </div>

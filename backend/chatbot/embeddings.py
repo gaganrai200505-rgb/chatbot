@@ -65,12 +65,12 @@ SCHEME_KNOWLEDGE_BASE = [
             "financial support of Rs 6000 per year to small and marginal farmers. "
             "It is given in 3 installments of Rs 2000 directly to the farmer's bank account. "
             "Eligibility: Indian farmers with cultivable land up to 2 hectares. "
-            "Apply at: pmkisan.gov.in or nearest Common Service Centre (CSC)."
+            "Apply online at [Apply on PM Kisan Portal](https://pmkisan.gov.in) or nearest Common Service Centre (CSC)."
         ),
         "details": {
             "benefit": "₹6,000/year (3 installments of ₹2,000)",
             "eligibility": "Small & marginal farmers with ≤2 hectares land",
-            "apply": "pmkisan.gov.in or nearest CSC",
+            "apply": "[Apply on PM Kisan Portal](https://pmkisan.gov.in) or nearest CSC",
             "ministry": "Ministry of Agriculture & Farmers Welfare",
         },
     },
@@ -80,13 +80,13 @@ SCHEME_KNOWLEDGE_BASE = [
             "SSP Scholarship is a Karnataka government scholarship for students from "
             "SC, ST, OBC, and minority communities. It covers pre-matric and post-matric "
             "scholarship amounts for school and college students. "
-            "Students must apply through the SSP Karnataka portal ssp.karnataka.gov.in. "
+            "Students must apply through the SSP Karnataka portal: [Apply on SSP Karnataka Portal](https://ssp.karnataka.gov.in). "
             "Documents needed: Aadhaar, caste certificate, income certificate, bank passbook."
         ),
         "details": {
             "benefit": "Tuition fees + maintenance allowance",
             "eligibility": "SC/ST/OBC/Minority students in Karnataka",
-            "apply": "ssp.karnataka.gov.in",
+            "apply": "[Apply on SSP Karnataka Portal](https://ssp.karnataka.gov.in)",
             "ministry": "Karnataka Social Welfare Department",
         },
     },
@@ -97,12 +97,12 @@ SCHEME_KNOWLEDGE_BASE = [
             "largest government-funded health insurance scheme. It provides health cover "
             "of Rs 5 lakh per family per year for secondary and tertiary care hospitalization. "
             "Coverage includes 1,929 medical procedures. Eligibility based on SECC 2011 database. "
-            "Check eligibility at pmjay.gov.in or call helpline 14555."
+            "Check eligibility and apply at [Apply on PMJAY Portal](https://beneficiary.nha.gov.in) or call helpline 14555."
         ),
         "details": {
             "benefit": "₹5 lakh/year health insurance per family",
             "eligibility": "Poor & vulnerable families based on SECC 2011",
-            "apply": "pmjay.gov.in | Helpline: 14555",
+            "apply": "[Apply on PMJAY Portal](https://beneficiary.nha.gov.in) | Helpline: 14555",
             "ministry": "Ministry of Health & Family Welfare",
         },
     },
@@ -113,12 +113,12 @@ SCHEME_KNOWLEDGE_BASE = [
             "to provide affordable housing to the urban and rural poor. "
             "Urban: PMAY-U provides subsidy on home loans up to Rs 2.67 lakh for EWS/LIG/MIG categories. "
             "Rural: PMAY-G provides Rs 1.2 lakh (plain areas) or Rs 1.3 lakh (hilly areas) for house construction. "
-            "Apply at pmaymis.gov.in or through your local Gram Panchayat or Urban Local Body."
+            "Apply online at [Apply on PMAY Portal](https://pmaymis.gov.in) or through your local Gram Panchayat or Urban Local Body."
         ),
         "details": {
             "benefit": "Home loan subsidy up to ₹2.67 lakh (Urban) | ₹1.2-1.3 lakh (Rural)",
             "eligibility": "EWS/LIG/MIG families without pucca house",
-            "apply": "pmaymis.gov.in | Gram Panchayat / ULB",
+            "apply": "[Apply on PMAY Portal](https://pmaymis.gov.in) | Gram Panchayat / ULB",
             "ministry": "Ministry of Housing & Urban Affairs",
         },
     },
@@ -129,14 +129,14 @@ SCHEME_KNOWLEDGE_BASE = [
             "to subsidized food grains from Fair Price Shops (FPS). "
             "Priority Household (PHH): 5 kg of food grains per person per month at subsidized rates. "
             "Antyodaya Anna Yojana (AAY): 35 kg per family per month for the poorest of the poor. "
-            "Apply through your state's Food and Civil Supplies department. "
-            "In Karnataka, apply at Ahara.kar.nic.in. One Nation One Ration Card (ONORC) allows "
+            "Apply online through [National Food Security Portal](https://nfsa.gov.in). "
+            "In Karnataka, apply at [Apply on Ahara Portal](https://ahara.kar.nic.in). One Nation One Ration Card (ONORC) allows "
             "portability across states using Aadhaar."
         ),
         "details": {
             "benefit": "Subsidized rice, wheat at ₹2-3/kg",
             "eligibility": "BPL / low-income households",
-            "apply": "State Food Department / ahara.kar.nic.in (Karnataka)",
+            "apply": "[Apply on NFSA Portal](https://nfsa.gov.in) | [Apply on Ahara Portal](https://ahara.kar.nic.in) (Karnataka)",
             "ministry": "Ministry of Consumer Affairs, Food & Public Distribution",
         },
     },
@@ -285,17 +285,22 @@ def build_faiss_index(force_rebuild=False):
     return _index, _schemes
 
 
+_query_embedding_cache = {}
+
 def encode_query(query_text: str) -> np.ndarray:
     """
-    Convert a query string to a normalized embedding vector.
-
-    Args:
-        query_text: The user's query (in English)
-
-    Returns:
-        A numpy array of shape (1, 384) — ready for vector search
+    Convert a query string to a normalized embedding vector with in-memory caching.
     """
+    clean_q = query_text.strip().lower()
+    if clean_q in _query_embedding_cache:
+        return _query_embedding_cache[clean_q]
+
     model = get_model()
     embedding = model.encode([query_text], convert_to_numpy=True)
     normalize_L2(embedding)
-    return embedding.astype(np.float32)
+    result = embedding.astype(np.float32)
+
+    if len(_query_embedding_cache) < 256:
+        _query_embedding_cache[clean_q] = result
+
+    return result

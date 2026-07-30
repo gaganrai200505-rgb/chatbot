@@ -40,7 +40,7 @@ def search_ddg_html(query: str) -> list:
         search_term = f"{query} scheme india eligibility apply documents"
         url = 'https://html.duckduckgo.com/html/?q=' + urllib.parse.quote(search_term)
         req = urllib.request.Request(url, headers=HEADERS)
-        html = urllib.request.urlopen(req, timeout=6).read().decode('utf-8', 'ignore')
+        html = urllib.request.urlopen(req, timeout=3.0).read().decode('utf-8', 'ignore')
         soup = BeautifulSoup(html, 'html.parser')
         
         results = []
