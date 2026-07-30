@@ -158,14 +158,13 @@ class ForgotPasswordView(APIView):
         email = request.data.get('email', '').strip().lower()
         if not email:
             return Response({'error': 'Email address is required.'}, status=status.HTTP_400_BAD_REQUEST)
-        # Always return a success message to prevent email enumeration attacks
         try:
-            user = User.objects.get(email__iexact=email, is_active=True)
+            user = User.objects.get(email__iexact=email)
             send_otp_email(user, OTPCode.PURPOSE_RESET)
         except User.DoesNotExist:
             pass
         except Exception as e:
-            return Response({'error': f'Failed to send email: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            print(f"[ForgotPasswordView Warning] send_otp_email error: {e}")
         return Response(
             {'message': 'If an account with that email exists, a reset OTP has been sent.'},
             status=status.HTTP_200_OK

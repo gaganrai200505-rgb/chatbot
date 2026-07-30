@@ -213,6 +213,16 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 # -------------------------------------------------------
 # Email (Gmail SMTP) — for OTP verification & password reset
 # -------------------------------------------------------
+# Force IPv4 socket resolution on cloud hosts (Render) to prevent [Errno 101] Network is unreachable
+import socket
+try:
+    _orig_getaddrinfo = socket.getaddrinfo
+    def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+    socket.getaddrinfo = _ipv4_getaddrinfo
+except Exception as _sock_err:
+    pass
+
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.gmail.com").strip('"').strip("'")
 EMAIL_PORT = int(os.getenv("EMAIL_PORT", 465))
