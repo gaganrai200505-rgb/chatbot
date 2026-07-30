@@ -97,91 +97,100 @@ def send_otp_email(user, purpose):
     Create a new OTP and dispatch email asynchronously/with short timeouts.
     Always logs OTP code to server stdout so it can be verified from Render logs.
     Account stays is_active=False until user verifies the OTP via /api/verify-otp/.
+    Never raises an exception — guarantees registration response succeeds.
     """
-    otp = create_otp(user, purpose)
+    try:
+        otp = create_otp(user, purpose)
+    except Exception as e:
+        print(f"[OTP ERROR] create_otp failed: {e}")
+        return None
 
     # ALWAYS log OTP to stdout for instant log inspection
     print("==========================================================================")
     print(f"[JANSEVA OTP] User: '{user.username}' | Email: '{user.email}' | Purpose: {purpose} | CODE: {otp.code}")
     print("==========================================================================")
 
-    subject_map = {
-        OTPCode.PURPOSE_VERIFY: 'JanSeva AI — Verify your email address',
-        OTPCode.PURPOSE_RESET:  'JanSeva AI — Password reset OTP',
-    }
-    body_map = {
-        OTPCode.PURPOSE_VERIFY: (
-            f"Hi {user.username},\n\n"
-            f"Welcome to JanSeva AI! Please verify your email using the OTP below:\n\n"
-            f"    {otp.code}\n\n"
-            f"This code expires in 10 minutes.\n"
-            f"If you did not create an account, you can safely ignore this email.\n\n"
-            f"— JanSeva AI Team"
-        ),
-        OTPCode.PURPOSE_RESET: (
-            f"Hi {user.username},\n\n"
-            f"We received a password reset request for your JanSeva AI account.\n"
-            f"Use the OTP below to reset your password:\n\n"
-            f"    {otp.code}\n\n"
-            f"This code expires in 10 minutes.\n"
-            f"If you did not request this, please ignore this email.\n\n"
-            f"— JanSeva AI Team"
-        ),
-    }
+    try:
+        host_user = getattr(settings, 'EMAIL_HOST_USER', '').strip()
+        raw_from = getattr(settings, 'DEFAULT_FROM_EMAIL', '') or host_user
+        m = re.search(r'<([^>]+)>', raw_from)
+        from_email = m.group(1).strip() if m else raw_from.strip()
+        if not from_email:
+            from_email = host_user
 
-    host_user = getattr(settings, 'EMAIL_HOST_USER', '').strip()
-    raw_from = getattr(settings, 'DEFAULT_FROM_EMAIL', '') or host_user
-    m = re.search(r'<([^>]+)>', raw_from)
-    from_email = m.group(1).strip() if m else raw_from.strip()
-    if not from_email:
-        from_email = host_user
+        subject_map = {
+            OTPCode.PURPOSE_VERIFY: 'JanSeva AI — Verify your email address',
+            OTPCode.PURPOSE_RESET:  'JanSeva AI — Password reset OTP',
+        }
+        body_map = {
+            OTPCode.PURPOSE_VERIFY: (
+                f"Hi {user.username},\n\n"
+                f"Welcome to JanSeva AI! Please verify your email using the OTP below:\n\n"
+                f"    {otp.code}\n\n"
+                f"This code expires in 10 minutes.\n"
+                f"If you did not create an account, you can safely ignore this email.\n\n"
+                f"— JanSeva AI Team"
+            ),
+            OTPCode.PURPOSE_RESET: (
+                f"Hi {user.username},\n\n"
+                f"We received a password reset request for your JanSeva AI account.\n"
+                f"Use the OTP below to reset your password:\n\n"
+                f"    {otp.code}\n\n"
+                f"This code expires in 10 minutes.\n"
+                f"If you did not request this, please ignore this email.\n\n"
+                f"— JanSeva AI Team"
+            ),
+        }
 
-    subject  = subject_map.get(purpose, 'JanSeva AI — Your OTP')
-    body     = body_map.get(purpose, f"Your OTP is: {otp.code}")
-    to_email = user.email.strip()
+        subject  = subject_map.get(purpose, 'JanSeva AI — Your OTP')
+        body     = body_map.get(purpose, f"Your OTP is: {otp.code}")
+        to_email = user.email.strip()
 
-    # 1. Try Brevo HTTP API
-    brevo_key = getattr(settings, 'BREVO_API_KEY', '') or getattr(settings, 'SENDINBLUE_API_KEY', '')
-    if brevo_key:
-        try:
-            if _send_via_brevo_api(brevo_key, from_email, to_email, subject, body):
-                return otp
-        except Exception as e:
-            print(f"[OTP WARNING] Brevo API failed: {e}")
+        # 1. Try Brevo HTTP API
+        brevo_key = getattr(settings, 'BREVO_API_KEY', '') or getattr(settings, 'SENDINBLUE_API_KEY', '')
+        if brevo_key:
+            try:
+                if _send_via_brevo_api(brevo_key, from_email, to_email, subject, body):
+                    return otp
+            except Exception as e:
+                print(f"[OTP WARNING] Brevo API failed: {e}")
 
-    # 2. Try Resend HTTP API
-    resend_key = getattr(settings, 'RESEND_API_KEY', '')
-    if resend_key:
-        try:
-            if _send_via_resend_api(resend_key, from_email, to_email, subject, body):
-                return otp
-        except Exception as e:
-            print(f"[OTP WARNING] Resend API failed: {e}")
+        # 2. Try Resend HTTP API
+        resend_key = getattr(settings, 'RESEND_API_KEY', '')
+        if resend_key:
+            try:
+                if _send_via_resend_api(resend_key, from_email, to_email, subject, body):
+                    return otp
+            except Exception as e:
+                print(f"[OTP WARNING] Resend API failed: {e}")
 
-    # 3. Fast SMTP attempt with 3s timeout
-    host = getattr(settings, 'EMAIL_HOST', 'smtp.gmail.com')
-    pwd  = getattr(settings, 'EMAIL_HOST_PASSWORD', '').strip()
-    port = getattr(settings, 'EMAIL_PORT', 587)
-    use_ssl = (port == 465)
-    use_tls = (port == 587)
+        # 3. Fast SMTP attempt with 3s timeout
+        host = getattr(settings, 'EMAIL_HOST', 'smtp.gmail.com')
+        pwd  = getattr(settings, 'EMAIL_HOST_PASSWORD', '').strip()
+        port = getattr(settings, 'EMAIL_PORT', 587)
+        use_ssl = (port == 465)
+        use_tls = (port == 587)
 
-    if host_user and pwd:
-        try:
-            print(f"[OTP] Attempting SMTP dispatch to {to_email} (port {port})...")
-            conn = get_connection(
-                backend='django.core.mail.backends.smtp.EmailBackend',
-                host=host,
-                port=port,
-                username=host_user,
-                password=pwd,
-                use_tls=use_tls,
-                use_ssl=use_ssl,
-                timeout=3
-            )
-            msg = EmailMessage(subject=subject, body=body, from_email=from_email, to=[to_email], connection=conn)
-            msg.send(fail_silently=False)
-            print(f"[OTP SUCCESS] SMTP email sent to {to_email}")
-        except Exception as smtp_err:
-            print(f"[OTP NOTICE] SMTP dispatch failed ({type(smtp_err).__name__}: {smtp_err}). OTP is logged in server output: {otp.code}")
+        if host_user and pwd:
+            try:
+                print(f"[OTP] Attempting SMTP dispatch to {to_email} (port {port})...")
+                conn = get_connection(
+                    backend='django.core.mail.backends.smtp.EmailBackend',
+                    host=host,
+                    port=port,
+                    username=host_user,
+                    password=pwd,
+                    use_tls=use_tls,
+                    use_ssl=use_ssl,
+                    timeout=3
+                )
+                msg = EmailMessage(subject=subject, body=body, from_email=from_email, to=[to_email], connection=conn)
+                msg.send(fail_silently=False)
+                print(f"[OTP SUCCESS] SMTP email sent to {to_email}")
+            except Exception as smtp_err:
+                print(f"[OTP NOTICE] SMTP dispatch failed ({type(smtp_err).__name__}: {smtp_err}). OTP is logged in server output: {otp.code}")
+
+    except Exception as general_err:
+        print(f"[OTP WARNING] Outer dispatch error: {general_err}")
 
     return otp

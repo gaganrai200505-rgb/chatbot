@@ -49,16 +49,11 @@ class RegisterView(generics.CreateAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
+        user = serializer.save()          # is_active=False set in serializer.create()
         try:
-            with transaction.atomic():
-                user = serializer.save()          # is_active=False set in serializer.create()
-                send_otp_email(user, OTPCode.PURPOSE_VERIFY)
+            send_otp_email(user, OTPCode.PURPOSE_VERIFY)
         except Exception as e:
-            print(f"[RegisterView ERROR] Registration failed: {e}")
-            return Response(
-                {"error": "Account registration failed: could not send verification email. Please check your email address and try again."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE
-            )
+            print(f"[RegisterView WARNING] send_otp_email exception: {e}")
 
         return Response(
             {
@@ -68,6 +63,7 @@ class RegisterView(generics.CreateAPIView):
             },
             status=status.HTTP_201_CREATED
         )
+
 
 
 class LogoutView(APIView):
