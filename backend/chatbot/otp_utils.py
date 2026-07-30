@@ -67,11 +67,12 @@ def send_otp_email(user, purpose):
     }
 
     # Check if SMTP credentials are set
-    host_user = getattr(settings, 'EMAIL_HOST_USER', '')
-    host_pass = getattr(settings, 'EMAIL_HOST_PASSWORD', '')
+    host_user = getattr(settings, 'EMAIL_HOST_USER', '').strip('"').strip("'")
+    host_pass = getattr(settings, 'EMAIL_HOST_PASSWORD', '').strip('"').strip("'")
+    from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', '').strip('"').strip("'") or host_user
 
     if not host_user or not host_pass:
-        print(f"[OTP] Server SMTP credentials not configured. Auto-activating user {user.username}. OTP: {otp.code}")
+        print(f"[OTP] Server SMTP credentials not configured. User {user.username}. OTP: {otp.code}")
         if purpose == OTPCode.PURPOSE_VERIFY:
             user.is_active = True
             user.save()
@@ -81,14 +82,15 @@ def send_otp_email(user, purpose):
         send_mail(
             subject=subject_map.get(purpose, 'JanSeva AI — Your OTP'),
             message=body_map.get(purpose, f"Your OTP is: {otp.code}"),
-            from_email=settings.DEFAULT_FROM_EMAIL or host_user,
-            recipient_list=[user.email],
+            from_email=from_email,
+            recipient_list=[user.email.strip()],
             fail_silently=False,
         )
-        print(f"[OTP] Verification email sent successfully to {user.email}")
+        print(f"[OTP SUCCESS] Sent {purpose} email to {user.email} (OTP Code: {otp.code})")
     except Exception as mail_err:
-        print(f"[OTP Warning] Failed to send email to {user.email}: {mail_err}. Auto-activating account.")
+        print(f"[OTP ERROR] Failed to send email to {user.email}: {mail_err}. (OTP Code: {otp.code})")
         if purpose == OTPCode.PURPOSE_VERIFY:
             user.is_active = True
             user.save()
+        raise mail_err
     return otp
