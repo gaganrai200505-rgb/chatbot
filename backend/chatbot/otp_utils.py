@@ -3,12 +3,12 @@ otp_utils.py — Fast, Non-blocking OTP generation & delivery
 
 Generates a 6-digit OTP and attempts email delivery via SMTP/HTTP.
 Logs the generated OTP clearly to server stdout so it can be read from Render logs.
-Catches email delivery exceptions gracefully so registration is fast and responsive.
+Returns the created OTP object so user accounts are registered in inactive state (is_active=False)
+pending OTP verification.
 """
 import random
 import string
 import re
-import socket
 import json
 import urllib.request
 import urllib.error
@@ -96,6 +96,7 @@ def send_otp_email(user, purpose):
     """
     Create a new OTP and dispatch email asynchronously/with short timeouts.
     Always logs OTP code to server stdout so it can be verified from Render logs.
+    Account stays is_active=False until user verifies the OTP via /api/verify-otp/.
     """
     otp = create_otp(user, purpose)
 
@@ -180,7 +181,6 @@ def send_otp_email(user, purpose):
             msg = EmailMessage(subject=subject, body=body, from_email=from_email, to=[to_email], connection=conn)
             msg.send(fail_silently=False)
             print(f"[OTP SUCCESS] SMTP email sent to {to_email}")
-            return otp
         except Exception as smtp_err:
             print(f"[OTP NOTICE] SMTP dispatch failed ({type(smtp_err).__name__}: {smtp_err}). OTP is logged in server output: {otp.code}")
 
