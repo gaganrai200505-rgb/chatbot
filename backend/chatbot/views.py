@@ -49,18 +49,20 @@ class RegisterView(generics.CreateAPIView):
         try:
             send_otp_email(user, OTPCode.PURPOSE_VERIFY)
         except Exception as e:
-            print(f"[RegisterView Warning] send_otp_email error: {e}")
-            user.is_active = True
-            user.save()
-
-        user.refresh_from_db()
-        if user.is_active:
-            msg = "Account created successfully! You can now sign in with your credentials."
-        else:
-            msg = "Account created. A 6-digit OTP has been sent to your registered email address."
+            # Email delivery failed — delete the incomplete user record and report the error clearly
+            print(f"[RegisterView ERROR] send_otp_email failed: {e}")
+            user.delete()
+            return Response(
+                {"error": "Account registration failed: could not send verification email. Please try again in a moment."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
 
         return Response(
-            {"message": msg, "username": user.username, "is_active": user.is_active},
+            {
+                "message": "Account created. A 6-digit OTP has been sent to your registered email address. Please check your inbox (and Spam folder).",
+                "username": user.username,
+                "is_active": False,
+            },
             status=status.HTTP_201_CREATED
         )
 
@@ -160,13 +162,22 @@ class ForgotPasswordView(APIView):
             return Response({'error': 'Email address is required.'}, status=status.HTTP_400_BAD_REQUEST)
         try:
             user = User.objects.get(email__iexact=email)
-            send_otp_email(user, OTPCode.PURPOSE_RESET)
         except User.DoesNotExist:
-            pass
+            # Don't reveal whether email exists
+            return Response(
+                {'message': 'If an account with that email exists, a reset OTP has been sent.'},
+                status=status.HTTP_200_OK
+            )
+        try:
+            send_otp_email(user, OTPCode.PURPOSE_RESET)
         except Exception as e:
-            print(f"[ForgotPasswordView Warning] send_otp_email error: {e}")
+            print(f"[ForgotPasswordView ERROR] send_otp_email failed for {email}: {e}")
+            return Response(
+                {'error': 'Could not send password reset email. Please try again in a moment.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
         return Response(
-            {'message': 'If an account with that email exists, a reset OTP has been sent.'},
+            {'message': 'A password reset OTP has been sent to your email. Please check your inbox (and Spam folder).'},
             status=status.HTTP_200_OK
         )
 

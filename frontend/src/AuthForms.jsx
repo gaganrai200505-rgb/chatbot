@@ -137,20 +137,9 @@ const AuthForms = () => {
     e.preventDefault(); clear(); setLoading(true);
     try {
       const res = await registerUser(username, password, email);
-      if (res?.is_active) {
-        setSuccess('Account created & activated! Signing you in…');
-        setTimeout(async () => {
-          try {
-            await loginUser(username, password);
-            login(username);
-          } catch (loginErr) {
-            goTo('login');
-          }
-        }, 1500);
-      } else {
-        setSuccess(res?.message || 'A 6-digit OTP has been sent to your email.');
-        setOtp(''); resetCountdown(60); setStep('verify-otp');
-      }
+      // Server now always returns is_active=false and sends OTP (or returns 503 on failure)
+      setSuccess(res?.message || 'A 6-digit OTP has been sent to your email.');
+      setOtp(''); resetCountdown(60); setStep('verify-otp');
     }
     catch (err) { setError(extractError(err)); }
     finally { setLoading(false); }
@@ -180,11 +169,16 @@ const AuthForms = () => {
   };
 
   const handleForgotEmail = async (e) => {
-    e.preventDefault(); clear(); setLoading(true);
+    e?.preventDefault(); clear(); setLoading(true);
     try {
-      await forgotPassword(email);
-      setSuccess('If your email is registered, a reset code has been sent.');
-      setOtp(''); resetCountdown(60); setStep('forgot-otp');
+      const res = await forgotPassword(email);
+      // Only go to OTP step if the server confirms email was sent (message not error)
+      if (res?.message) {
+        setSuccess(res.message);
+        setOtp(''); resetCountdown(60); setStep('forgot-otp');
+      } else {
+        setError(res?.error || 'Something went wrong. Please try again.');
+      }
     }
     catch (err) { setError(extractError(err)); }
     finally { setLoading(false); }
