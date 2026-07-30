@@ -58,6 +58,7 @@ INSTALLED_APPS = [
 # -------------------------------------------------------
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",  # MUST be first for CORS to work
+    "django.middleware.gzip.GZipMiddleware",    # Compress HTTP responses for high speed
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",  # Serve static files in production
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -95,6 +96,7 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": BASE_DIR / "db.sqlite3",
+        "CONN_MAX_AGE": 600,
     }
 }
 

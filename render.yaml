@@ -4,7 +4,7 @@ services:
     name: janseva-ai-backend
     env: python
     buildCommand: pip install -r backend/requirements.txt && python backend/manage.py collectstatic --noinput && python backend/manage.py migrate
-    startCommand: cd backend && gunicorn config.wsgi:application --bind 0.0.0.0:$PORT
+    startCommand: cd backend && gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 4 --threads 2 --worker-class gthread
     envVars:
       - key: GROQ_API_KEY
         sync: false

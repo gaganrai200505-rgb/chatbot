@@ -130,9 +130,12 @@ def fallback_wikipedia_search(query: str) -> str:
         print(f"[WebSearch] Wikipedia fallback error: {ex}")
         return ""
 
+import functools
+
+@functools.lru_cache(maxsize=256)
 def search_web(query: str, max_results: int = 5) -> str:
     """
-    Main Live Web Search entrypoint.
+    Main Live Web Search entrypoint with LRU caching.
     Executes multi-engine search, ranks government portals higher, and returns formatted context.
     """
     print(f"[WebSearch] Executing live web search for: '{query}'")
