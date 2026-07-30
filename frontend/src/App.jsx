@@ -364,6 +364,7 @@ const ChatPage = () => {
 
   const handleNewChat = () => {
     setActiveSessionId(null);
+    setSidebarOpen(false);
   };
 
   // Delete chat session handler with optimistic state update
@@ -434,6 +435,14 @@ const ChatPage = () => {
               <GeminiSparkleIcon size={22} />
             </div>
             <span className="sidebar-app-name">JanSeva AI</span>
+            <button
+              className="sidebar-close-btn"
+              onClick={() => setSidebarOpen(false)}
+              aria-label="Close menu"
+              title="Close menu"
+            >
+              ✕
+            </button>
           </div>
 
           {/* New chat button */}
@@ -568,6 +577,18 @@ const ChatPage = () => {
             >
               <MenuIcon />
             </button>
+
+            {/* Direct 1-tap New Chat button for Mobile & Quick Access */}
+            <button
+              className="topbar-new-chat-btn"
+              onClick={handleNewChat}
+              title="Start New Chat"
+              aria-label="New Chat"
+            >
+              <PlusIcon />
+              <span className="topbar-new-chat-label">New Chat</span>
+            </button>
+
             <span className="model-badge">JanSeva AI</span>
           </div>
 

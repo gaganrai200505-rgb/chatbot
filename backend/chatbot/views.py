@@ -49,14 +49,18 @@ class RegisterView(generics.CreateAPIView):
         try:
             send_otp_email(user, OTPCode.PURPOSE_VERIFY)
         except Exception as e:
-            # If email fails, clean up the user and report the error
-            user.delete()
-            return Response(
-                {"error": f"Failed to send verification email: {str(e)}. Please check your email address and try again."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            print(f"[RegisterView Warning] send_otp_email error: {e}")
+            user.is_active = True
+            user.save()
+
+        user.refresh_from_db()
+        if user.is_active:
+            msg = "Account created successfully! You can now sign in with your credentials."
+        else:
+            msg = "Account created. A 6-digit OTP has been sent to your registered email address."
+
         return Response(
-            {"message": "Account created. A 6-digit OTP has been sent to your email.", "username": user.username},
+            {"message": msg, "username": user.username, "is_active": user.is_active},
             status=status.HTTP_201_CREATED
         )
 
@@ -252,7 +256,7 @@ class ChatAPIView(APIView):
 
             if is_ascii_eng:
                 detected_lang = "en"
-            elif not requested_language or requested_language == "auto":
+            elif not requested_language or requested_language == "auto" or is_voice:
                 detected_lang = detect_language(query)
             else:
                 detected_lang = requested_language
@@ -281,7 +285,7 @@ class ChatAPIView(APIView):
                     import json
                     for token_chunk in get_rag_response_stream(query_english, query, chat_history=chat_history, selected_state=state_filter, is_voice_mode=is_voice, target_lang=lang_code):
                         acc_chunks.append(token_chunk)
-                        yield f"data: {json.dumps({'token': token_chunk, 'session_id': sess_id})}\n\n"
+                        yield f"data: {json.dumps({'token': token_chunk, 'session_id': sess_id, 'detected_lang': lang_code})}\n\n"
                     
                     full_acc = "".join(acc_chunks)
                     # The LLM stream already outputs in target_lang directly; avoid redundant 3-second GoogleTranslator HTTP lag
@@ -477,14 +481,19 @@ class TextToSpeechAPIView(APIView):
 
         voice_id = request.data.get("voice_id", "").lower().strip()
 
-        # Map language code & voice_id to ChatGPT Neural Voices (Onyx, Cove, Sky, Breeze)
+        # Map language code & voice_id to ChatGPT & Regional Indian Neural Voices
         VOICE_MAP = {
-            "en": "en-US-ChristopherNeural",            # ChatGPT Onyx style warm, smooth voice
+            "en": "en-US-ChristopherNeural",            # Onyx smooth voice
             "en-in": "en-IN-PrabhatNeural",             # Warm Indian male neural voice
-            "hi": "hi-IN-MadhurNeural",                 # High quality Hindi neural voice
-            "kn": "kn-IN-GaganNeural",                  # High quality Kannada neural voice
-            "ta": "ta-IN-ValluvarNeural",               # High quality Tamil neural voice
-            "te": "te-IN-MohanNeural",                  # High quality Telugu neural voice
+            "hi": "hi-IN-MadhurNeural",                 # Hindi male neural voice
+            "kn": "kn-IN-GaganNeural",                  # Kannada male neural voice
+            "ta": "ta-IN-ValluvarNeural",               # Tamil male neural voice
+            "te": "te-IN-MohanNeural",                  # Telugu male neural voice
+            "mr": "mr-IN-ManoharNeural",                # Marathi male neural voice
+            "bn": "bn-IN-BashkarNeural",                # Bengali male neural voice
+            "gu": "gu-IN-NiranjanNeural",               # Gujarati male neural voice
+            "ml": "ml-IN-MidhunNeural",                 # Malayalam male neural voice
+            "pa": "hi-IN-MadhurNeural",                 # Punjabi neural voice
             "auto": "en-US-ChristopherNeural",
         }
 

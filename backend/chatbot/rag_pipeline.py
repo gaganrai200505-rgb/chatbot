@@ -396,15 +396,37 @@ Write strictly in plain text without markdown or symbols."""
 Give a short, warm, natural 1-sentence response strictly in {lang_name} under 15 words, confirming you hear them loud and clear and asking what scheme they would like to explore today. Write strictly in plain text without markdown or symbols."""
 
 
+def is_non_government_query(query: str) -> bool:
+    """
+    Detects if a query is clearly non-government (off-topic), e.g., sports, coding,
+    recipes, movies, trivia, weather, entertainment, etc.
+    """
+    import re
+    q = query.lower().strip()
+
+    # Off-topic patterns
+    off_topic_patterns = [
+        r'\btell me a joke\b', r'\bjoke\b', r'\bsing a song\b', r'\bweather in\b',
+        r'\bipl\b', r'\bcricket\b', r'\bfootball\b', r'\bmovie\b', r'\bcinema\b',
+        r'\bactor\b', r'\bactress\b', r'\brecipe\b', r'\bhow to cook\b',
+        r'\bpython code\b', r'\bjavascript\b', r'\bprogram\b', r'\bgame\b',
+        r'\bcapital of\b', r'\bwho won\b', r'\bpresident of usa\b', r'\btrump\b', r'\bbiden\b',
+    ]
+    for p in off_topic_patterns:
+        if re.search(p, q):
+            return True
+    return False
+
+
 def _build_voice_companion_prompt(query: str, context: str = "", target_lang: str = "en", chat_history: list = None) -> str:
     """Build a prompt tailored specifically for ChatGPT-style live voice companion interaction."""
     ctx_str = f"VERIFIED SCHEME CONTEXT:\n{context}\n\n" if context else ""
     lang_name = LANGUAGE_NAMES.get(target_lang, 'English')
 
-    # Detect if query is English text vs non-English
+    # Language determination for live voice companion
     import re
     is_query_english = bool(re.match(r'^[a-zA-Z0-9\s\?\!\.\,\'\-]+$', query.strip()))
-    effective_lang = "English" if is_query_english or target_lang == "en" else lang_name
+    effective_lang = "English" if (is_query_english and target_lang == "en") else lang_name
 
     # Build a short conversation history string so the LLM knows what topic is active
     history_str = ""
@@ -416,19 +438,21 @@ def _build_voice_companion_prompt(query: str, context: str = "", target_lang: st
             lines.append(f"{role}: {m.get('content', '')[:200]}")
         history_str = "\nRECENT CONVERSATION:\n" + "\n".join(lines) + "\n"
 
-    return f"""You are JanSeva AI, a real-time 2-way voice companion built to sound EXACTLY like ChatGPT Voice Mode.
-You are talking directly to a friend over a live voice call.
+    return f"""You are JanSeva AI, an authoritative real-time voice companion specialized EXCLUSIVELY in Indian Central and State Government schemes, welfare programs, scholarships, health insurance, pensions, subsidies, and public services.
+
+STRICT DOMAIN & GUARDRAIL RULES:
+1. DOMAIN LOCK: YOU MUST ONLY DISCUSS INDIAN GOVERNMENT SCHEMES, WELFARE BENEFITS, AND PUBLIC SERVICES.
+2. NON-GOVERNMENT GUARDRAIL: If the user asks an off-topic question (e.g. sports, movies, coding, recipes, weather, general trivia), POLITELY DECLINE. Say: "I am JanSeva AI, specialized strictly in Indian Government schemes and welfare services. Please ask me any question about government schemes like Ayushman Bharat, PM Kisan, or scholarship programs!"
+3. SCHEME SWITCHING: If the user explicitly asks about a NEW government scheme (e.g. switching from Ayushman Bharat to PM Kisan), IMMEDIATELY switch to the new scheme asked by the user!
+4. TOPIC CONTINUITY: If the user asks a follow-up question WITHOUT naming a new scheme (e.g., "Am I eligible?", "What documents do I need?"), answer specifically for the active scheme being discussed in RECENT CONVERSATION.
+5. ACCURACY: Provide 100% accurate, verified details from the VERIFIED SCHEME CONTEXT. Do NOT invent fake income limits, age limits, or fake application steps.
 
 LANGUAGE INSTRUCTION:
 - The user spoke in {effective_lang}.
-- You MUST respond STRICTLY in {effective_lang}. If {effective_lang} is English, write 100% in plain English. Do NOT use Hindi unless the user spoke Hindi.
+- You MUST respond STRICTLY in {effective_lang}. Write 100% in plain spoken {effective_lang}.
+
 {history_str}
 {ctx_str}USER'S SPOKEN QUESTION: "{query}"
-
-CRITICAL TOPIC-LOCK RULE:
-- READ the RECENT CONVERSATION above carefully to identify which specific government scheme is currently being discussed.
-- Your answer MUST stay on that EXACT scheme. Do NOT drift to a different scheme or topic.
-- If the user asks about eligibility, documents, or how to apply, answer specifically for the scheme that was just discussed.
 
 CHATGPT VOICE AGENT RULES:
 1. TALK LIKE CHATGPT VOICE: Be warm, friendly, natural, and human. Use short natural spoken intros (e.g., "Hey there!", "Oh sure!", "Got it, my friend!").
@@ -564,6 +588,12 @@ def get_rag_response(query_english: str, original_query: str, chat_history: list
     """
     Execute the RAG Pipeline.
     """
+    if is_non_government_query(query_english):
+        return {
+            "response": "I am JanSeva AI, specialized strictly in Indian Government schemes and welfare services. Please ask me any question about government schemes like Ayushman Bharat, PM Kisan, NSP scholarships, or state welfare programs!",
+            "source": "domain_guardrail"
+        }
+
     if is_conversational_ack(query_english):
         print(f"[RAG] Conversational greeting / audio check / ack detected: '{query_english}'")
         try:
@@ -656,6 +686,10 @@ def get_rag_response_stream(query_english: str, original_query: str, chat_histor
     """
     Generator yielding realtime LLM tokens for ultra-low latency SSE response.
     """
+    if is_non_government_query(query_english):
+        yield "I am JanSeva AI, specialized strictly in Indian Government schemes and welfare services. Please ask me any question about government schemes like Ayushman Bharat, PM Kisan, NSP scholarships, or state welfare programs!"
+        return
+
     if is_conversational_ack(query_english):
         try:
             prompt = _build_conversational_ack_prompt(query_english, chat_history=chat_history, target_lang=target_lang)

@@ -167,6 +167,7 @@ export const sendChatMessageStream = async (query, language = '', sessionId = ''
   const decoder = new TextDecoder('utf-8');
   let fullText = '';
   let activeSessionId = sessionId;
+  let detectedLang = language;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -177,8 +178,8 @@ export const sendChatMessageStream = async (query, language = '', sessionId = ''
 
     for (const line of lines) {
       if (line.startsWith('data: [DONE]')) {
-        if (onComplete) onComplete(fullText, activeSessionId);
-        return { response: fullText, session_id: activeSessionId };
+        if (onComplete) onComplete(fullText, activeSessionId, detectedLang);
+        return { response: fullText, session_id: activeSessionId, detected_lang: detectedLang };
       }
       if (line.startsWith('data: ')) {
         try {
@@ -186,6 +187,7 @@ export const sendChatMessageStream = async (query, language = '', sessionId = ''
           if (!jsonStr) continue;
           const parsed = JSON.parse(jsonStr);
           if (parsed.session_id) activeSessionId = parsed.session_id;
+          if (parsed.detected_lang) detectedLang = parsed.detected_lang;
           if (parsed.token) {
             fullText += parsed.token;
             if (onChunk) onChunk(parsed.token, fullText, activeSessionId);
@@ -195,8 +197,8 @@ export const sendChatMessageStream = async (query, language = '', sessionId = ''
     }
   }
 
-  if (onComplete) onComplete(fullText, activeSessionId);
-  return { response: fullText, session_id: activeSessionId };
+  if (onComplete) onComplete(fullText, activeSessionId, detectedLang);
+  return { response: fullText, session_id: activeSessionId, detected_lang: detectedLang };
 };
 
 /** Fetch chat history (requires JWT) */

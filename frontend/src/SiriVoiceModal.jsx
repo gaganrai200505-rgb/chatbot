@@ -468,14 +468,22 @@ const SiriVoiceModal = ({
           setAiText(accText);
           if (newSessionId && onSessionStarted) onSessionStarted(newSessionId);
         },
-        (finalText, finalSessionId) => {
+        (finalText, finalSessionId, detectedLang) => {
           setAiText(finalText);
           setHistoryLogs(prev => [...prev, { user: q, ai: finalText }]);
           if (onMessageSent) onMessageSent();
           isProcessingRef.current = false;
 
+          // Instant Mid-Call Language Switcher: update language to match user's spoken language
+          let speakLang = currentLanguageRef.current;
+          if (detectedLang && detectedLang !== currentLanguageRef.current) {
+            currentLanguageRef.current = detectedLang;
+            speakLang = detectedLang;
+            if (onLanguageChange) onLanguageChange(detectedLang);
+          }
+
           if (finalText && !isMutedRef.current) {
-            speakAnswer(finalText, currentLanguageRef.current);
+            speakAnswer(finalText, speakLang);
           } else {
             setMode('idle');
             if (!isMutedRef.current && startListeningRef.current) {
