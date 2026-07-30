@@ -249,4 +249,9 @@ else:
     EMAIL_USE_TLS = True
     EMAIL_USE_SSL = False
 
+# HTTP-based email API keys (never blocked by cloud firewalls / Google security)
+BREVO_API_KEY  = os.getenv("BREVO_API_KEY", "").strip('"\'')
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip('"\'')
+
+
 
