@@ -78,19 +78,47 @@ def send_otp_email(user, purpose):
             user.save()
         return otp
 
-    try:
-        send_mail(
-            subject=subject_map.get(purpose, 'JanSeva AI — Your OTP'),
-            message=body_map.get(purpose, f"Your OTP is: {otp.code}"),
-            from_email=from_email,
-            recipient_list=[user.email.strip()],
-            fail_silently=False,
-        )
-        print(f"[OTP SUCCESS] Sent {purpose} email to {user.email} (OTP Code: {otp.code})")
-    except Exception as mail_err:
-        print(f"[OTP ERROR] Failed to send email to {user.email}: {mail_err}. (OTP Code: {otp.code})")
+    # Multi-port fallback strategy for cloud servers: Try 465 SSL first, then 587 TLS
+    from django.core.mail.backends.smtp import EmailBackend
+    from django.core.mail import EmailMessage
+
+    ports_to_try = [
+        (465, True, False),   # Port 465 SSL
+        (587, False, True),   # Port 587 TLS
+    ]
+
+    sent = False
+    last_err = None
+
+    for port, use_ssl, use_tls in ports_to_try:
+        try:
+            backend = EmailBackend(
+                host=getattr(settings, 'EMAIL_HOST', 'smtp.gmail.com').strip('"').strip("'"),
+                port=port,
+                username=host_user,
+                password=host_pass,
+                use_tls=use_tls,
+                use_ssl=use_ssl,
+                timeout=10
+            )
+            email_msg = EmailMessage(
+                subject=subject_map.get(purpose, 'JanSeva AI — Your OTP'),
+                body=body_map.get(purpose, f"Your OTP is: {otp.code}"),
+                from_email=from_email,
+                to=[user.email.strip()],
+                connection=backend
+            )
+            email_msg.send(fail_silently=False)
+            print(f"[OTP SUCCESS] Sent {purpose} email to {user.email} over port {port} (OTP: {otp.code})")
+            sent = True
+            break
+        except Exception as err:
+            last_err = err
+            print(f"[OTP Warning] Port {port} failed for {user.email}: {err}")
+
+    if not sent:
+        print(f"[OTP ERROR] All SMTP ports failed for {user.email}: {last_err}. OTP: {otp.code}")
         if purpose == OTPCode.PURPOSE_VERIFY:
             user.is_active = True
             user.save()
-        raise mail_err
     return otp
