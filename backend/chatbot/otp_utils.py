@@ -1,11 +1,13 @@
 """
 otp_utils.py — OTP generation and email sending utilities
 
-Uses raw smtplib with explicit IPv4 DNS resolution to guarantee
-email delivery from cloud hosts (e.g. Render) that block IPv6.
+Uses raw smtplib.SMTP with STARTTLS and explicit IPv4 DNS resolution
+to guarantee email delivery from cloud hosts (e.g. Render) that block IPv6.
 
-Key trick: resolve hostname -> IPv4, create raw TCP socket to IPv4,
-but pass the original HOSTNAME to SSL wrap for SNI/cert validation.
+Strategy: Resolve smtp.gmail.com -> IPv4 address, then connect
+directly to that IPv4 address using port 587 STARTTLS. This bypasses
+IPv6 networking issues on cloud containers and avoids SSL cert mismatch
+that occurs when using the raw IP with SSL (port 465).
 """
 import random
 import string
@@ -51,20 +53,20 @@ def create_otp(user, purpose):
 
 def _resolve_ipv4(hostname):
     """
-    Resolve hostname to the first IPv4 address found.
-    This bypasses the OS default that prefers IPv6 on cloud containers.
+    Resolve hostname to the first IPv4 address.
+    Bypasses the OS preference for IPv6 on cloud containers.
     """
     try:
         results = socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_STREAM)
         if results:
-            return results[0][4][0]  # First IPv4 address
+            return results[0][4][0]
     except Exception as e:
         print(f"[OTP] IPv4 resolution failed for {hostname}: {e}")
-    return hostname  # Fall back to hostname if resolution fails
+    return hostname
 
 
-def _build_email_message(from_addr, to_addr, subject, body):
-    """Build a MIME email message."""
+def _build_message(from_addr, to_addr, subject, body):
+    """Build and return a MIME email as a string."""
     msg = MIMEMultipart('alternative')
     msg['Subject'] = subject
     msg['From'] = from_addr
@@ -73,51 +75,46 @@ def _build_email_message(from_addr, to_addr, subject, body):
     return msg.as_string()
 
 
-def _send_port_465_ssl(ipv4_host, smtp_host, username, password, from_addr, to_addr, subject, body):
+def _smtp_send(smtp_host, ipv4_host, port, username, password,
+               from_addr, to_addr, subject, body, use_ssl=False):
     """
-    Send via port 465 (SSL) using a pre-resolved IPv4 address.
-    CRITICAL: Create raw TCP socket to IPv4 address, then wrap with SSL
-    using the ORIGINAL HOSTNAME for SNI certificate validation.
+    Send email using smtplib. Connects to ipv4_host:port directly.
+    - use_ssl=False (port 587): uses STARTTLS
+    - use_ssl=True (port 465): uses SMTP_SSL with the original hostname for SNI
+
+    For SSL (port 465), we subclass SMTP_SSL to override _get_socket so that
+    the TCP connection goes to ipv4_host but SSL wrapping uses smtp_host for SNI.
     """
-    raw_sock = socket.create_connection((ipv4_host, 465), timeout=15)
-    ctx = ssl.create_default_context()
-    ssl_sock = ctx.wrap_socket(raw_sock, server_hostname=smtp_host)
+    msg_str = _build_message(from_addr, to_addr, subject, body)
 
-    smtp = smtplib.SMTP(timeout=15)
-    smtp.sock = ssl_sock
-    smtp._tls_established = True
-    smtp.file = smtp.sock.makefile('rb')
+    if use_ssl:
+        # Subclass SMTP_SSL: connect TCP to IPv4 address but use hostname for SSL SNI
+        class IPv4SMTP_SSL(smtplib.SMTP_SSL):
+            def _get_socket(self, host, port, timeout):
+                # Connect raw socket to IPv4 address
+                raw_sock = socket.create_connection((ipv4_host, port), timeout)
+                # Wrap with SSL using original hostname for certificate validation
+                return self.context.wrap_socket(raw_sock, server_hostname=smtp_host)
 
-    (code, _) = smtp.getreply()
-    if code != 220:
-        raise smtplib.SMTPConnectError(code, "Unexpected SMTP greeting")
-
-    smtp.ehlo(smtp_host)
-    smtp.login(username, password)
-    msg_str = _build_email_message(from_addr, to_addr, subject, body)
-    smtp.sendmail(from_addr, [to_addr], msg_str)
-    smtp.quit()
-
-
-def _send_port_587_starttls(ipv4_host, smtp_host, username, password, from_addr, to_addr, subject, body):
-    """
-    Send via port 587 (STARTTLS) using a pre-resolved IPv4 address.
-    """
-    with smtplib.SMTP(ipv4_host, 587, timeout=15) as smtp:
-        smtp.ehlo(smtp_host)
-        smtp.starttls()
-        smtp.ehlo(smtp_host)
-        smtp.login(username, password)
-        msg_str = _build_email_message(from_addr, to_addr, subject, body)
-        smtp.sendmail(from_addr, [to_addr], msg_str)
+        ctx = ssl.create_default_context()
+        with IPv4SMTP_SSL(smtp_host, port, context=ctx, timeout=15) as smtp:
+            smtp.login(username, password)
+            smtp.sendmail(from_addr, [to_addr], msg_str)
+    else:
+        # STARTTLS: connect to IPv4 address directly
+        with smtplib.SMTP(ipv4_host, port, timeout=15) as smtp:
+            smtp.ehlo(smtp_host)
+            smtp.starttls(context=ssl.create_default_context())
+            smtp.ehlo(smtp_host)
+            smtp.login(username, password)
+            smtp.sendmail(from_addr, [to_addr], msg_str)
 
 
 def send_otp_email(user, purpose):
     """
     Create a new OTP and email it to the user.
-    Uses raw smtplib with forced IPv4 DNS resolution for cloud compatibility.
-    Tries port 465 (SSL) first, then 587 (STARTTLS).
-    Raises Exception if all attempts fail so callers can handle appropriately.
+    Tries port 587 (STARTTLS) first, then 465 (SSL) as fallback.
+    Raises Exception if all attempts fail.
     """
     otp = create_otp(user, purpose)
 
@@ -130,66 +127,66 @@ def send_otp_email(user, purpose):
             f"Hi {user.username},\n\n"
             f"Welcome to JanSeva AI! Please verify your email address using the OTP below:\n\n"
             f"    {otp.code}\n\n"
-            f"This code is valid for 10 minutes. If you did not create an account, you can safely ignore this email.\n\n"
+            f"This code is valid for 10 minutes. If you did not create an account, "
+            f"you can safely ignore this email.\n\n"
             f"— JanSeva AI Team"
         ),
         OTPCode.PURPOSE_RESET: (
             f"Hi {user.username},\n\n"
             f"We received a request to reset your JanSeva AI password. Use the OTP below:\n\n"
             f"    {otp.code}\n\n"
-            f"This code is valid for 10 minutes. If you did not request a password reset, please ignore this email.\n\n"
+            f"This code is valid for 10 minutes. If you did not request a password reset, "
+            f"please ignore this email.\n\n"
             f"— JanSeva AI Team"
         ),
     }
 
-    # Read SMTP credentials from settings
-    host_user = getattr(settings, 'EMAIL_HOST_USER', '').strip('"').strip("'").strip()
-    host_pass = getattr(settings, 'EMAIL_HOST_PASSWORD', '').strip('"').strip("'").strip()
-    smtp_host = getattr(settings, 'EMAIL_HOST', 'smtp.gmail.com').strip('"').strip("'").strip()
+    # Read SMTP credentials
+    host_user = getattr(settings, 'EMAIL_HOST_USER', '').strip('"\'').strip()
+    host_pass = getattr(settings, 'EMAIL_HOST_PASSWORD', '').strip('"\'').strip()
+    smtp_host  = getattr(settings, 'EMAIL_HOST', 'smtp.gmail.com').strip('"\'').strip()
 
-    # Extract clean "From" address — handle both "Name <email>" and plain "email" formats
+    # Extract clean From address (handles "Name <email>" format)
     import re
     raw_from = getattr(settings, 'DEFAULT_FROM_EMAIL', '') or host_user
-    match = re.search(r'<([^>]+)>', raw_from)
-    from_email = match.group(1).strip() if match else raw_from.strip('"').strip("'").strip()
+    m = re.search(r'<([^>]+)>', raw_from)
+    from_email = m.group(1).strip() if m else raw_from.strip('"\'').strip()
     if not from_email:
         from_email = host_user
 
-    subject = subject_map.get(purpose, 'JanSeva AI — Your OTP')
-    body = body_map.get(purpose, f"Your OTP is: {otp.code}")
+    subject  = subject_map.get(purpose, 'JanSeva AI — Your OTP')
+    body     = body_map.get(purpose, f"Your OTP is: {otp.code}")
     to_email = user.email.strip()
 
-    print(f"[OTP] Preparing to send {purpose} email to {to_email} (OTP: {otp.code})")
+    print(f"[OTP] Sending {purpose} OTP to {to_email}")
 
-    # No credentials configured — skip email
     if not host_user or not host_pass:
-        print(f"[OTP] SMTP credentials not configured. Skipping email. OTP: {otp.code}")
+        print(f"[OTP] No SMTP credentials configured. OTP: {otp.code}")
         return otp
 
-    # Resolve to IPv4 once — avoids repeated DNS lookups and ensures cloud compatibility
+    # Resolve once to IPv4
     ipv4_host = _resolve_ipv4(smtp_host)
-    print(f"[OTP] Resolved {smtp_host} -> {ipv4_host}")
+    print(f"[OTP] DNS: {smtp_host} -> {ipv4_host}")
 
-    # Try port 465 (SSL) first, then 587 (STARTTLS)
+    # Port order: 587 STARTTLS first (more universally available on cloud),
+    # then 465 SSL as fallback
+    attempts = [
+        (587, False, "STARTTLS"),
+        (465, True,  "SSL"),
+    ]
     last_err = None
 
-    print(f"[OTP] Trying port 465 (SSL)...")
-    try:
-        _send_port_465_ssl(ipv4_host, smtp_host, host_user, host_pass, from_email, to_email, subject, body)
-        print(f"[OTP SUCCESS] {purpose} OTP sent to {to_email} via port 465 SSL")
-        return otp
-    except Exception as err:
-        last_err = err
-        print(f"[OTP WARNING] Port 465 failed: {type(err).__name__}: {err}")
+    for port, use_ssl, label in attempts:
+        try:
+            print(f"[OTP] Trying port {port} ({label})...")
+            _smtp_send(smtp_host, ipv4_host, port, host_user, host_pass,
+                       from_email, to_email, subject, body, use_ssl=use_ssl)
+            print(f"[OTP SUCCESS] Sent via port {port} ({label})")
+            return otp
+        except Exception as err:
+            last_err = err
+            print(f"[OTP WARNING] Port {port} ({label}) failed: {type(err).__name__}: {err}")
 
-    print(f"[OTP] Trying port 587 (STARTTLS)...")
-    try:
-        _send_port_587_starttls(ipv4_host, smtp_host, host_user, host_pass, from_email, to_email, subject, body)
-        print(f"[OTP SUCCESS] {purpose} OTP sent to {to_email} via port 587 STARTTLS")
-        return otp
-    except Exception as err:
-        last_err = err
-        print(f"[OTP WARNING] Port 587 failed: {type(err).__name__}: {err}")
-
-    # All ports failed — raise so the caller knows email was NOT sent
-    raise Exception(f"Failed to send OTP email to {to_email} on all ports. Last error: {last_err}")
+    raise Exception(
+        f"All SMTP attempts failed for {to_email}. Last error: {last_err}"
+    )
