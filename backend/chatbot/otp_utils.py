@@ -1,17 +1,18 @@
 """
 otp_utils.py — OTP generation and email sending utilities
 
-Sends OTP emails via Django's built-in email backend (SMTP).
-The IPv4-only socket patch applied in config/wsgi.py ensures
-that smtp.gmail.com resolves to an IPv4 address on Render,
-avoiding the [Errno 101] Network is unreachable error caused
-by cloud hosts that don't route IPv6 traffic.
+Sends OTP emails via Django's built-in email backend (SMTP) with automatic
+dual-port failover (465 SSL <-> 587 STARTTLS) for cloud host compatibility.
+
+The IPv4-only socket patch applied in config/wsgi.py and settings.py ensures
+that smtp.gmail.com resolves to an IPv4 address on Render, avoiding the
+[Errno 101] Network is unreachable error caused by cloud hosts without IPv6.
 """
 import random
 import string
 import re
 
-from django.core.mail import EmailMessage
+from django.core.mail import EmailMessage, get_connection
 from django.conf import settings
 from .models import OTPCode
 
@@ -24,7 +25,7 @@ def generate_otp(length=6):
 def create_otp(user, purpose):
     """
     Invalidate all existing OTPs for this user+purpose and create a fresh one.
-    Auto-runs migrations if the DB table is missing (first deploy).
+    Auto-runs migrations if the DB table is missing.
     """
     from django.db.utils import OperationalError
     from django.core.management import call_command
@@ -47,15 +48,52 @@ def create_otp(user, purpose):
         return OTPCode.objects.create(user=user, code=code, purpose=purpose)
 
 
+def _dispatch_email(subject, body, from_email, to_email):
+    """
+    Sends an email with automatic dual-port failover between 465 SSL and 587 STARTTLS.
+    Raises Exception if both ports fail.
+    """
+    host = getattr(settings, 'EMAIL_HOST', 'smtp.gmail.com')
+    user = getattr(settings, 'EMAIL_HOST_USER', '')
+    pwd  = getattr(settings, 'EMAIL_HOST_PASSWORD', '')
+
+    # Primary attempt (uses settings configuration)
+    try:
+        msg = EmailMessage(subject=subject, body=body, from_email=from_email, to=[to_email])
+        msg.send(fail_silently=False)
+        print(f"[OTP SUCCESS] Primary email dispatched to {to_email}")
+        return
+    except Exception as primary_err:
+        print(f"[OTP WARNING] Primary email attempt failed: {primary_err}")
+
+    # Failover attempt (swaps port 465 <-> 587)
+    primary_port = getattr(settings, 'EMAIL_PORT', 465)
+    fallback_port = 587 if primary_port == 465 else 465
+    fallback_use_ssl = (fallback_port == 465)
+    fallback_use_tls = (fallback_port == 587)
+
+    print(f"[OTP] Attempting failover connection on port {fallback_port} (SSL={fallback_use_ssl}, TLS={fallback_use_tls})...")
+
+    conn = get_connection(
+        backend='django.core.mail.backends.smtp.EmailBackend',
+        host=host,
+        port=fallback_port,
+        username=user,
+        password=pwd,
+        use_tls=fallback_use_tls,
+        use_ssl=fallback_use_ssl,
+        timeout=15
+    )
+    msg = EmailMessage(subject=subject, body=body, from_email=from_email, to=[to_email], connection=conn)
+    msg.send(fail_silently=False)
+    print(f"[OTP SUCCESS] Failover email dispatched to {to_email} via port {fallback_port}")
+
+
 def send_otp_email(user, purpose):
     """
     Create a new OTP and send it to the user via email.
-
-    Uses Django's configured email backend (see settings.py).
-    The wsgi.py IPv4 socket patch ensures cloud-compatible DNS resolution.
-
-    Raises Exception on failure — callers must handle this and NOT
-    silently activate the user account.
+    Uses dual-port failover (465 SSL / 587 STARTTLS).
+    Raises Exception on failure so callers can abort/rollback user creation.
     """
     otp = create_otp(user, purpose)
 
@@ -103,15 +141,5 @@ def send_otp_email(user, purpose):
     to_email = user.email.strip()
 
     print(f"[OTP] Sending {purpose} OTP to {to_email} (code={otp.code})")
-
-    # Send via Django's configured backend — raises on failure
-    msg = EmailMessage(
-        subject=subject,
-        body=body,
-        from_email=from_email,
-        to=[to_email],
-    )
-    msg.send(fail_silently=False)
-
-    print(f"[OTP SUCCESS] {purpose} email dispatched to {to_email}")
+    _dispatch_email(subject, body, from_email, to_email)
     return otp
