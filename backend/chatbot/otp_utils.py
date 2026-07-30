@@ -117,20 +117,33 @@ def _dispatch_email(subject, body, from_email, to_email):
         except Exception as resend_err:
             print(f"[OTP WARNING] Resend HTTP API failed: {resend_err}")
 
-    # 3. Primary SMTP attempt (uses Django settings)
+    # 3. Primary SMTP attempt (uses Django settings with fast 5s timeout)
+    host = getattr(settings, 'EMAIL_HOST', 'smtp.gmail.com')
+    user = getattr(settings, 'EMAIL_HOST_USER', '')
+    pwd  = getattr(settings, 'EMAIL_HOST_PASSWORD', '')
+    primary_port = getattr(settings, 'EMAIL_PORT', 465)
+    primary_use_ssl = (primary_port == 465)
+    primary_use_tls = (primary_port == 587)
+
     try:
-        msg = EmailMessage(subject=subject, body=body, from_email=from_email, to=[to_email])
+        conn = get_connection(
+            backend='django.core.mail.backends.smtp.EmailBackend',
+            host=host,
+            port=primary_port,
+            username=user,
+            password=pwd,
+            use_tls=primary_use_tls,
+            use_ssl=primary_use_ssl,
+            timeout=5
+        )
+        msg = EmailMessage(subject=subject, body=body, from_email=from_email, to=[to_email], connection=conn)
         msg.send(fail_silently=False)
         print(f"[OTP SUCCESS] Primary SMTP email dispatched to {to_email}")
         return
     except Exception as primary_err:
         print(f"[OTP WARNING] Primary SMTP failed ({type(primary_err).__name__}: {primary_err})")
 
-    # 4. Failover SMTP attempt (swaps port 465 <-> 587)
-    host = getattr(settings, 'EMAIL_HOST', 'smtp.gmail.com')
-    user = getattr(settings, 'EMAIL_HOST_USER', '')
-    pwd  = getattr(settings, 'EMAIL_HOST_PASSWORD', '')
-    primary_port = getattr(settings, 'EMAIL_PORT', 465)
+    # 4. Failover SMTP attempt (swaps port 465 <-> 587 with fast 5s timeout)
     fallback_port = 587 if primary_port == 465 else 465
     fallback_use_ssl = (fallback_port == 465)
     fallback_use_tls = (fallback_port == 587)
@@ -146,7 +159,7 @@ def _dispatch_email(subject, body, from_email, to_email):
             password=pwd,
             use_tls=fallback_use_tls,
             use_ssl=fallback_use_ssl,
-            timeout=15
+            timeout=5
         )
         msg = EmailMessage(subject=subject, body=body, from_email=from_email, to=[to_email], connection=conn)
         msg.send(fail_silently=False)
