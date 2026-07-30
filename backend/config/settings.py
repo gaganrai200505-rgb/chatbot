@@ -232,14 +232,21 @@ EMAIL_BACKEND  = "django.core.mail.backends.smtp.EmailBackend"
 EMAIL_HOST     = os.getenv("EMAIL_HOST", "smtp.gmail.com").strip('"\'')
 EMAIL_HOST_USER     = os.getenv("EMAIL_HOST_USER", "").strip('"\'')
 EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "").strip('"\'')
-EMAIL_TIMEOUT  = 20
+EMAIL_TIMEOUT  = 15
 
 _raw_from = os.getenv("DEFAULT_FROM_EMAIL", "").strip('"\'')
 DEFAULT_FROM_EMAIL = _raw_from if _raw_from else EMAIL_HOST_USER
 
-# Always use port 587 + STARTTLS on cloud — most reliable outbound config.
-# Gmail App Password works on both 465 and 587; 587 has fewer cloud firewall issues.
-EMAIL_PORT    = 587
-EMAIL_USE_TLS = True
-EMAIL_USE_SSL = False
+# Dynamic PORT & SSL/TLS: support both 465 SSL and 587 TLS from env vars
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "465"))
+_use_ssl_env = os.getenv("EMAIL_USE_SSL", "True").lower() in ("true", "1")
+_use_tls_env = os.getenv("EMAIL_USE_TLS", "False").lower() in ("true", "1")
+
+if EMAIL_PORT == 465 or _use_ssl_env:
+    EMAIL_USE_SSL = True
+    EMAIL_USE_TLS = False
+else:
+    EMAIL_USE_TLS = True
+    EMAIL_USE_SSL = False
+
 
