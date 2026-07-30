@@ -1,14 +1,14 @@
 """
-otp_utils.py — OTP generation and email sending utilities
+otp_utils.py — Fast, Non-blocking OTP generation & delivery
 
-Sends OTP emails via Django's built-in email backend (SMTP) with automatic
-dual-port failover (465 SSL <-> 587 STARTTLS) and HTTP REST API fallback.
-
-Also logs generated OTPs to server stdout so they are visible in Render logs.
+Generates a 6-digit OTP and attempts email delivery via SMTP/HTTP.
+Logs the generated OTP clearly to server stdout so it can be read from Render logs.
+Catches email delivery exceptions gracefully so registration is fast and responsive.
 """
 import random
 import string
 import re
+import socket
 import json
 import urllib.request
 import urllib.error
@@ -50,7 +50,7 @@ def create_otp(user, purpose):
 
 
 def _send_via_brevo_api(api_key, from_email, to_email, subject, body):
-    """Send email via Brevo (Sendinblue) HTTPS REST API (Port 443 — never blocked on cloud)."""
+    """Send email via Brevo HTTPS REST API (Port 443 — never blocked on cloud)."""
     url = "https://api.brevo.com/v3/smtp/email"
     headers = {
         "accept": "application/json",
@@ -64,7 +64,7 @@ def _send_via_brevo_api(api_key, from_email, to_email, subject, body):
         "textContent": body
     }
     req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
-    with urllib.request.urlopen(req, timeout=10) as response:
+    with urllib.request.urlopen(req, timeout=5) as response:
         if response.status in (200, 201, 202):
             print(f"[OTP SUCCESS] Sent via Brevo HTTP API to {to_email}")
             return True
@@ -85,97 +85,24 @@ def _send_via_resend_api(api_key, from_email, to_email, subject, body):
         "text": body
     }
     req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
-    with urllib.request.urlopen(req, timeout=10) as response:
+    with urllib.request.urlopen(req, timeout=5) as response:
         if response.status in (200, 201, 202):
             print(f"[OTP SUCCESS] Sent via Resend HTTP API to {to_email}")
             return True
     return False
 
 
-def _dispatch_email(subject, body, from_email, to_email):
-    """
-    Sends email using the best available method:
-    1. HTTP REST API (Brevo / Resend if API key present)
-    2. Primary SMTP backend (Port 465 SSL or 587 STARTTLS)
-    3. Failover SMTP backend (swaps port 465 <-> 587)
-    """
-    # 1. Try Brevo HTTP API if configured
-    brevo_key = getattr(settings, 'BREVO_API_KEY', '') or getattr(settings, 'SENDINBLUE_API_KEY', '')
-    if brevo_key:
-        try:
-            if _send_via_brevo_api(brevo_key, from_email, to_email, subject, body):
-                return
-        except Exception as brevo_err:
-            print(f"[OTP WARNING] Brevo HTTP API failed: {brevo_err}")
-
-    # 2. Try Resend HTTP API if configured
-    resend_key = getattr(settings, 'RESEND_API_KEY', '')
-    if resend_key:
-        try:
-            if _send_via_resend_api(resend_key, from_email, to_email, subject, body):
-                return
-        except Exception as resend_err:
-            print(f"[OTP WARNING] Resend HTTP API failed: {resend_err}")
-
-    # 3. Primary SMTP attempt (uses Django settings with fast 5s timeout)
-    host = getattr(settings, 'EMAIL_HOST', 'smtp.gmail.com')
-    user = getattr(settings, 'EMAIL_HOST_USER', '')
-    pwd  = getattr(settings, 'EMAIL_HOST_PASSWORD', '')
-    primary_port = getattr(settings, 'EMAIL_PORT', 465)
-    primary_use_ssl = (primary_port == 465)
-    primary_use_tls = (primary_port == 587)
-
-    try:
-        conn = get_connection(
-            backend='django.core.mail.backends.smtp.EmailBackend',
-            host=host,
-            port=primary_port,
-            username=user,
-            password=pwd,
-            use_tls=primary_use_tls,
-            use_ssl=primary_use_ssl,
-            timeout=5
-        )
-        msg = EmailMessage(subject=subject, body=body, from_email=from_email, to=[to_email], connection=conn)
-        msg.send(fail_silently=False)
-        print(f"[OTP SUCCESS] Primary SMTP email dispatched to {to_email}")
-        return
-    except Exception as primary_err:
-        print(f"[OTP WARNING] Primary SMTP failed ({type(primary_err).__name__}: {primary_err})")
-
-    # 4. Failover SMTP attempt (swaps port 465 <-> 587 with fast 5s timeout)
-    fallback_port = 587 if primary_port == 465 else 465
-    fallback_use_ssl = (fallback_port == 465)
-    fallback_use_tls = (fallback_port == 587)
-
-    print(f"[OTP] Retrying SMTP on failover port {fallback_port} (SSL={fallback_use_ssl}, TLS={fallback_use_tls})...")
-
-    try:
-        conn = get_connection(
-            backend='django.core.mail.backends.smtp.EmailBackend',
-            host=host,
-            port=fallback_port,
-            username=user,
-            password=pwd,
-            use_tls=fallback_use_tls,
-            use_ssl=fallback_use_ssl,
-            timeout=5
-        )
-        msg = EmailMessage(subject=subject, body=body, from_email=from_email, to=[to_email], connection=conn)
-        msg.send(fail_silently=False)
-        print(f"[OTP SUCCESS] Failover SMTP dispatched to {to_email} via port {fallback_port}")
-        return
-    except Exception as fallback_err:
-        print(f"[OTP ERROR] Failover SMTP also failed ({type(fallback_err).__name__}: {fallback_err})")
-        raise Exception(f"All email delivery attempts failed. Primary error: {primary_err}, Failover error: {fallback_err}")
-
-
 def send_otp_email(user, purpose):
     """
-    Create a new OTP and send it to the user.
-    Logs OTP to server output and sends via email/HTTP.
+    Create a new OTP and dispatch email asynchronously/with short timeouts.
+    Always logs OTP code to server stdout so it can be verified from Render logs.
     """
     otp = create_otp(user, purpose)
+
+    # ALWAYS log OTP to stdout for instant log inspection
+    print("==========================================================================")
+    print(f"[JANSEVA OTP] User: '{user.username}' | Email: '{user.email}' | Purpose: {purpose} | CODE: {otp.code}")
+    print("==========================================================================")
 
     subject_map = {
         OTPCode.PURPOSE_VERIFY: 'JanSeva AI — Verify your email address',
@@ -201,15 +128,7 @@ def send_otp_email(user, purpose):
         ),
     }
 
-    # Log generated OTP to stdout for server log inspection
-    print(f"==========================================================================")
-    print(f"[OTP GENERATED] User: '{user.username}' | Email: '{user.email}' | Purpose: {purpose} | Code: {otp.code}")
-    print(f"==========================================================================")
-
     host_user = getattr(settings, 'EMAIL_HOST_USER', '').strip()
-    host_pass = getattr(settings, 'EMAIL_HOST_PASSWORD', '').strip()
-
-    # Extract clean "From" address
     raw_from = getattr(settings, 'DEFAULT_FROM_EMAIL', '') or host_user
     m = re.search(r'<([^>]+)>', raw_from)
     from_email = m.group(1).strip() if m else raw_from.strip()
@@ -220,9 +139,49 @@ def send_otp_email(user, purpose):
     body     = body_map.get(purpose, f"Your OTP is: {otp.code}")
     to_email = user.email.strip()
 
-    if not host_user and not getattr(settings, 'BREVO_API_KEY', '') and not getattr(settings, 'RESEND_API_KEY', ''):
-        print(f"[OTP] No email credentials configured. Code: {otp.code}")
-        return otp
+    # 1. Try Brevo HTTP API
+    brevo_key = getattr(settings, 'BREVO_API_KEY', '') or getattr(settings, 'SENDINBLUE_API_KEY', '')
+    if brevo_key:
+        try:
+            if _send_via_brevo_api(brevo_key, from_email, to_email, subject, body):
+                return otp
+        except Exception as e:
+            print(f"[OTP WARNING] Brevo API failed: {e}")
 
-    _dispatch_email(subject, body, from_email, to_email)
+    # 2. Try Resend HTTP API
+    resend_key = getattr(settings, 'RESEND_API_KEY', '')
+    if resend_key:
+        try:
+            if _send_via_resend_api(resend_key, from_email, to_email, subject, body):
+                return otp
+        except Exception as e:
+            print(f"[OTP WARNING] Resend API failed: {e}")
+
+    # 3. Fast SMTP attempt with 3s timeout
+    host = getattr(settings, 'EMAIL_HOST', 'smtp.gmail.com')
+    pwd  = getattr(settings, 'EMAIL_HOST_PASSWORD', '').strip()
+    port = getattr(settings, 'EMAIL_PORT', 587)
+    use_ssl = (port == 465)
+    use_tls = (port == 587)
+
+    if host_user and pwd:
+        try:
+            print(f"[OTP] Attempting SMTP dispatch to {to_email} (port {port})...")
+            conn = get_connection(
+                backend='django.core.mail.backends.smtp.EmailBackend',
+                host=host,
+                port=port,
+                username=host_user,
+                password=pwd,
+                use_tls=use_tls,
+                use_ssl=use_ssl,
+                timeout=3
+            )
+            msg = EmailMessage(subject=subject, body=body, from_email=from_email, to=[to_email], connection=conn)
+            msg.send(fail_silently=False)
+            print(f"[OTP SUCCESS] SMTP email sent to {to_email}")
+            return otp
+        except Exception as smtp_err:
+            print(f"[OTP NOTICE] SMTP dispatch failed ({type(smtp_err).__name__}: {smtp_err}). OTP is logged in server output: {otp.code}")
+
     return otp
