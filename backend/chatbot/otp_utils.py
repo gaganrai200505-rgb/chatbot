@@ -69,7 +69,12 @@ def send_otp_email(user, purpose):
     # Check if SMTP credentials are set
     host_user = getattr(settings, 'EMAIL_HOST_USER', '').strip('"').strip("'")
     host_pass = getattr(settings, 'EMAIL_HOST_PASSWORD', '').strip('"').strip("'")
-    from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', '').strip('"').strip("'") or host_user
+    import re
+    raw_from = getattr(settings, 'DEFAULT_FROM_EMAIL', '') or host_user
+    m = re.search(r'<([^>]+)>', raw_from)
+    from_email = m.group(1).strip() if m else raw_from.strip('"').strip("'").strip()
+    if not from_email:
+        from_email = host_user
 
     if not host_user or not host_pass:
         print(f"[OTP] Server SMTP credentials not configured. User {user.username}. OTP: {otp.code}")
