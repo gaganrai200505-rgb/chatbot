@@ -28,25 +28,22 @@ def create_otp(user, purpose):
     Invalidate all existing OTPs for this user+purpose and create a fresh one.
     Auto-runs migrations if the DB table is missing.
     """
-    from django.db.utils import OperationalError
     from django.core.management import call_command
-
-    try:
-        OTPCode.objects.filter(user=user, purpose=purpose, is_used=False).update(is_used=True)
-    except OperationalError:
-        print("[OTP] DB table missing — running migrate...")
-        try:
-            call_command('migrate', interactive=False)
-            OTPCode.objects.filter(user=user, purpose=purpose, is_used=False).update(is_used=True)
-        except Exception as mig_err:
-            print(f"[OTP] migrate warning: {mig_err}")
 
     code = generate_otp()
     try:
+        OTPCode.objects.filter(user=user, purpose=purpose, is_used=False).update(is_used=True)
         return OTPCode.objects.create(user=user, code=code, purpose=purpose)
-    except OperationalError:
-        call_command('migrate', interactive=False)
-        return OTPCode.objects.create(user=user, code=code, purpose=purpose)
+    except Exception as err:
+        print(f"[OTP] create_otp DB warning ({err}) — running migrate & retrying...")
+        try:
+            call_command('migrate', interactive=False)
+            OTPCode.objects.filter(user=user, purpose=purpose, is_used=False).update(is_used=True)
+            return OTPCode.objects.create(user=user, code=code, purpose=purpose)
+        except Exception as retry_err:
+            print(f"[OTP ERROR] create_otp retry failed: {retry_err}")
+            raise retry_err
+
 
 
 def _send_via_brevo_api(api_key, from_email, to_email, subject, body):
