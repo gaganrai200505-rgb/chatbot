@@ -135,7 +135,23 @@ const AuthForms = () => {
 
   const handleSignup = async (e) => {
     e.preventDefault(); clear(); setLoading(true);
-    try { await registerUser(username, password, email); setOtp(''); resetCountdown(60); setStep('verify-otp'); }
+    try {
+      const res = await registerUser(username, password, email);
+      if (res?.is_active) {
+        setSuccess('Account created & activated! Signing you in…');
+        setTimeout(async () => {
+          try {
+            await loginUser(username, password);
+            login(username);
+          } catch (loginErr) {
+            goTo('login');
+          }
+        }, 1500);
+      } else {
+        setSuccess(res?.message || 'A 6-digit OTP has been sent to your email.');
+        setOtp(''); resetCountdown(60); setStep('verify-otp');
+      }
+    }
     catch (err) { setError(extractError(err)); }
     finally { setLoading(false); }
   };
