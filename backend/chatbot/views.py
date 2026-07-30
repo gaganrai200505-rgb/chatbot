@@ -160,14 +160,15 @@ class ForgotPasswordView(APIView):
         email = request.data.get('email', '').strip().lower()
         if not email:
             return Response({'error': 'Email address is required.'}, status=status.HTTP_400_BAD_REQUEST)
-        try:
-            user = User.objects.get(email__iexact=email)
-        except User.DoesNotExist:
+
+        user = User.objects.filter(email__iexact=email).first()
+        if not user:
             # Don't reveal whether email exists
             return Response(
                 {'message': 'If an account with that email exists, a reset OTP has been sent.'},
                 status=status.HTTP_200_OK
             )
+
         try:
             send_otp_email(user, OTPCode.PURPOSE_RESET)
         except Exception as e:
@@ -205,9 +206,8 @@ class ResetPasswordView(APIView):
             msgs = ' '.join(serializer.errors.get('new_password', ['Invalid password.']))
             return Response({'error': msgs}, status=status.HTTP_400_BAD_REQUEST)
 
-        try:
-            user = User.objects.get(email__iexact=email, is_active=True)
-        except User.DoesNotExist:
+        user = User.objects.filter(email__iexact=email, is_active=True).first()
+        if not user:
             return Response({'error': 'No active account found with that email.'}, status=status.HTTP_404_NOT_FOUND)
 
         otp = OTPCode.objects.filter(user=user, code=code, purpose=OTPCode.PURPOSE_RESET, is_used=False).last()
