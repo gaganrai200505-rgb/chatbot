@@ -58,20 +58,13 @@ const OtpInput = ({ value, onChange }) => {
   };
 
   return (
-    <div style={{ display: 'flex', gap: '8px', justifyContent: 'center', margin: '8px 0' }}>
+    <div className="otp-container">
       {digits.map((d, i) => (
         <input key={i} ref={el => inputs.current[i] = el}
           type="text" inputMode="numeric" maxLength={1}
+          className={`otp-box ${d.trim() ? 'filled' : ''}`}
           value={d.trim()} onChange={() => {}} onKeyDown={e => handleKey(e, i)}
           onFocus={e => e.target.select()}
-          style={{
-            width: '44px', height: '52px', textAlign: 'center',
-            fontSize: '1.4rem', fontWeight: '700',
-            background: 'rgba(255,255,255,0.08)',
-            border: d.trim() ? '2px solid rgba(99,179,237,0.8)' : '2px solid rgba(255,255,255,0.2)',
-            borderRadius: '10px', color: '#fff', outline: 'none',
-            caretColor: 'transparent', transition: 'border-color 0.2s',
-          }}
         />
       ))}
     </div>
@@ -91,10 +84,11 @@ const useCountdown = (initial = 60) => {
 
 /* ─── Message box ────────────────────────────────────────────────── */
 const MsgBox = ({ msg, isError = true }) => msg ? (
-  <div className="auth-error" role="alert"
-    style={!isError ? { background: 'rgba(72,187,120,0.15)', borderColor: 'rgba(72,187,120,0.4)' } : {}}>
-    {isError ? <AlertIcon /> : <SuccessIcon />}
-    <span>{msg}</span>
+  <div className={`auth-msg ${isError ? 'auth-msg-error' : 'auth-msg-success'}`} role="alert">
+    <div className="auth-msg-icon">
+      {isError ? <AlertIcon /> : <SuccessIcon />}
+    </div>
+    <span className="auth-msg-text">{msg}</span>
   </div>
 ) : null;
 
@@ -119,11 +113,20 @@ const AuthForms = () => {
   const goTo  = (s) => { clear(); setStep(s); };
 
   const extractError = (err) => {
+    if (!err.response && (err.message === 'Network Error' || err.code === 'ERR_NETWORK')) {
+      return 'Network Connection Error: Unable to reach server. Please check your internet connection.';
+    }
     const data = err.response?.data;
-    if (typeof data === 'string' && data.trim().startsWith('<')) return 'Server error. Please try again.';
+    if (typeof data === 'string' && data.trim().startsWith('<')) {
+      return 'Server Error: Temporary server issue. Please try again in a moment.';
+    }
     if (data?.error) return data.error;
-    if (data && typeof data === 'object') return Object.values(data).flat().join(' ');
-    return err.message || 'Something went wrong.';
+    if (data?.detail) return data.detail;
+    if (data && typeof data === 'object') {
+      const msgs = Object.values(data).flat().join(' ');
+      if (msgs) return msgs;
+    }
+    return err.message || 'Something went wrong. Please try again.';
   };
 
   const handleLogin = async (e) => {
@@ -216,6 +219,7 @@ const AuthForms = () => {
       <div className="auth-orb auth-orb-2" />
       <div className="auth-orb auth-orb-3" />
       <div className="auth-card">
+        <div className={`auth-card-loader ${loading ? 'active' : ''}`} />
 
         {/* Logo */}
         <div className="auth-logo">
@@ -230,110 +234,114 @@ const AuthForms = () => {
         </div>
 
         {/* ── Sign In ── */}
-        {step === 'login' && (<>
-          <div className="auth-tabs" role="tablist">
-            <button role="tab" aria-selected className="auth-tab active" id="tab-login">Sign In</button>
-            <button role="tab" className="auth-tab" id="tab-signup" onClick={() => goTo('signup')}>Sign Up</button>
-          </div>
-          <form onSubmit={handleLogin} className="auth-form" noValidate>
-            <div className="auth-field">
-              <label htmlFor="l-user">Username</label>
-              <input id="l-user" type="text" className="auth-input" value={username}
-                onChange={e => setUsername(e.target.value)} placeholder="Enter your username"
-                required autoFocus autoComplete="username" />
+        {step === 'login' && (
+          <div className="auth-form-step">
+            <div className="auth-tabs" role="tablist">
+              <button role="tab" aria-selected className="auth-tab active" id="tab-login">Sign In</button>
+              <button role="tab" className="auth-tab" id="tab-signup" onClick={() => goTo('signup')}>Sign Up</button>
             </div>
-            <div className="auth-field">
-              <label htmlFor="l-pass">Password</label>
-              <div className="auth-input-wrap">
-                <input id="l-pass" type={showPass ? 'text' : 'password'} className="auth-input"
-                  value={password} onChange={e => setPassword(e.target.value)}
-                  placeholder="Enter your password" required autoComplete="current-password" />
-                <button type="button" className="auth-eye-btn" onClick={() => setShowPass(!showPass)}>
-                  <EyeIcon open={showPass} />
-                </button>
+            <form onSubmit={handleLogin} className="auth-form" noValidate>
+              <div className="auth-field">
+                <label htmlFor="l-user">Username</label>
+                <input id="l-user" type="text" className="auth-input" value={username}
+                  onChange={e => setUsername(e.target.value)} placeholder="Enter your username"
+                  required autoFocus autoComplete="username" />
               </div>
-            </div>
-            <button type="button" onClick={() => goTo('forgot-email')}
-              style={{ background: 'none', border: 'none', color: 'rgba(99,179,237,0.85)', fontSize: '0.8rem',
-                cursor: 'pointer', textAlign: 'right', width: '100%', marginTop: '-4px', marginBottom: '4px' }}>
-              Forgot password?
-            </button>
-            <MsgBox msg={error} isError />
-            <MsgBox msg={success} isError={false} />
-            <button type="submit" className="auth-submit" disabled={loading}>
-              {loading ? <span className="auth-spinner" /> : 'Sign In'}
-            </button>
-          </form>
-          <p className="auth-footer">Don't have an account? <button className="auth-switch" onClick={() => goTo('signup')}>Sign Up</button></p>
-        </>)}
+              <div className="auth-field">
+                <label htmlFor="l-pass">Password</label>
+                <div className="auth-input-wrap">
+                  <input id="l-pass" type={showPass ? 'text' : 'password'} className="auth-input"
+                    value={password} onChange={e => setPassword(e.target.value)}
+                    placeholder="Enter your password" required autoComplete="current-password" />
+                  <button type="button" className="auth-eye-btn" onClick={() => setShowPass(!showPass)}>
+                    <EyeIcon open={showPass} />
+                  </button>
+                </div>
+              </div>
+              <button type="button" onClick={() => goTo('forgot-email')}
+                style={{ background: 'none', border: 'none', color: '#60a5fa', fontSize: '0.8rem',
+                  cursor: 'pointer', textAlign: 'right', width: '100%', marginTop: '-4px', marginBottom: '4px', opacity: 0.9 }}>
+                Forgot password?
+              </button>
+              <MsgBox msg={error} isError />
+              <MsgBox msg={success} isError={false} />
+              <button type="submit" className="auth-submit" disabled={loading}>
+                {loading ? <><span className="auth-btn-spinner" /> Signing in...</> : 'Sign In'}
+              </button>
+            </form>
+            <p className="auth-footer">Don't have an account? <button className="auth-switch" onClick={() => goTo('signup')}>Sign Up</button></p>
+          </div>
+        )}
 
         {/* ── Sign Up ── */}
-        {step === 'signup' && (<>
-          <div className="auth-tabs" role="tablist">
-            <button role="tab" className="auth-tab" id="tab-login-s" onClick={() => goTo('login')}>Sign In</button>
-            <button role="tab" aria-selected className="auth-tab active" id="tab-signup-s">Sign Up</button>
-          </div>
-          <form onSubmit={handleSignup} className="auth-form" noValidate>
-            <div className="auth-field">
-              <label htmlFor="su-user">Username</label>
-              <input id="su-user" type="text" className="auth-input" value={username}
-                onChange={e => setUsername(e.target.value)} placeholder="Choose a username"
-                required autoFocus autoComplete="username" />
+        {step === 'signup' && (
+          <div className="auth-form-step">
+            <div className="auth-tabs" role="tablist">
+              <button role="tab" className="auth-tab" id="tab-login-s" onClick={() => goTo('login')}>Sign In</button>
+              <button role="tab" aria-selected className="auth-tab active" id="tab-signup-s">Sign Up</button>
             </div>
-            <div className="auth-field">
-              <label htmlFor="su-email">
-                Email <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.75rem' }}>(required for verification)</span>
-              </label>
-              <input id="su-email" type="email" className="auth-input" value={email}
-                onChange={e => setEmail(e.target.value)} placeholder="your@email.com"
-                required autoComplete="email" />
-            </div>
-            <div className="auth-field">
-              <label htmlFor="su-pass">Password</label>
-              <div className="auth-input-wrap">
-                <input id="su-pass" type={showPass ? 'text' : 'password'} className="auth-input"
-                  value={password} onChange={e => setPassword(e.target.value)}
-                  placeholder="Min. 8 characters" required minLength={8} autoComplete="new-password" />
-                <button type="button" className="auth-eye-btn" onClick={() => setShowPass(!showPass)}>
-                  <EyeIcon open={showPass} />
-                </button>
+            <form onSubmit={handleSignup} className="auth-form" noValidate>
+              <div className="auth-field">
+                <label htmlFor="su-user">Username</label>
+                <input id="su-user" type="text" className="auth-input" value={username}
+                  onChange={e => setUsername(e.target.value)} placeholder="Choose a username"
+                  required autoFocus autoComplete="username" />
               </div>
-              <p style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.4)', marginTop: '4px' }}>
-                Min. 8 characters. Avoid common words.
-              </p>
-            </div>
-            <MsgBox msg={error} isError />
-            <button type="submit" className="auth-submit" disabled={loading}>
-              {loading ? <span className="auth-spinner" /> : 'Create Account'}
-            </button>
-          </form>
-          <p className="auth-footer">Already have an account? <button className="auth-switch" onClick={() => goTo('login')}>Sign In</button></p>
-        </>)}
+              <div className="auth-field">
+                <label htmlFor="su-email">
+                  Email <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.75rem' }}>(required for verification)</span>
+                </label>
+                <input id="su-email" type="email" className="auth-input" value={email}
+                  onChange={e => setEmail(e.target.value)} placeholder="your@email.com"
+                  required autoComplete="email" />
+              </div>
+              <div className="auth-field">
+                <label htmlFor="su-pass">Password</label>
+                <div className="auth-input-wrap">
+                  <input id="su-pass" type={showPass ? 'text' : 'password'} className="auth-input"
+                    value={password} onChange={e => setPassword(e.target.value)}
+                    placeholder="Min. 8 characters" required minLength={8} autoComplete="new-password" />
+                  <button type="button" className="auth-eye-btn" onClick={() => setShowPass(!showPass)}>
+                    <EyeIcon open={showPass} />
+                  </button>
+                </div>
+                <p style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.4)', marginTop: '4px' }}>
+                  Min. 8 characters. Avoid common words.
+                </p>
+              </div>
+              <MsgBox msg={error} isError />
+              <button type="submit" className="auth-submit" disabled={loading}>
+                {loading ? <><span className="auth-btn-spinner" /> Creating account...</> : 'Create Account'}
+              </button>
+            </form>
+            <p className="auth-footer">Already have an account? <button className="auth-switch" onClick={() => goTo('login')}>Sign In</button></p>
+          </div>
+        )}
 
         {/* ── Email Verification OTP ── */}
         {step === 'verify-otp' && (
-          <div style={{ textAlign: 'center' }}>
+          <div className="auth-form-step" style={{ textAlign: 'center' }}>
             <div style={{ fontSize: '2.5rem', marginBottom: '8px' }}>📧</div>
             <h2 style={{ color: '#fff', fontWeight: '700', marginBottom: '6px' }}>Verify your email</h2>
             <p style={{ color: 'rgba(255,255,255,0.55)', fontSize: '0.875rem', marginBottom: '20px' }}>
               A 6-digit code was sent to{' '}
-              <strong style={{ color: 'rgba(99,179,237,0.9)' }}>{email}</strong>
+              <strong style={{ color: '#60a5fa' }}>{email}</strong>
             </p>
             <form onSubmit={handleVerifyOtp} className="auth-form" noValidate>
               <OtpInput value={otp} onChange={setOtp} />
-              <p style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.35)', margin: '8px 0 16px' }}>
-                Code expires in 10 minutes
-              </p>
+              <div style={{ margin: '8px 0 16px' }}>
+                <span className="auth-expiry-badge">⏱️ Code expires in 10 minutes</span>
+              </div>
               <MsgBox msg={error} isError />
               <MsgBox msg={success} isError={false} />
               <button type="submit" className="auth-submit"
                 disabled={loading || otp.replace(/\s/g, '').length < 6}>
-                {loading ? <span className="auth-spinner" /> : 'Verify Email'}
+                {loading ? <><span className="auth-btn-spinner" /> Verifying Code...</> : 'Verify Email'}
               </button>
             </form>
             {resendBtn(handleResendVerify)}
             <button onClick={() => goTo('signup')}
-              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.35)',
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.4)',
                 fontSize: '0.75rem', marginTop: '8px', display: 'block', margin: '8px auto 0' }}>
               ← Back to Sign Up
             </button>
@@ -342,7 +350,7 @@ const AuthForms = () => {
 
         {/* ── Forgot Password: Enter Email ── */}
         {step === 'forgot-email' && (
-          <div>
+          <div className="auth-form-step">
             <button onClick={() => goTo('login')}
               style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.45)',
                 fontSize: '0.8rem', marginBottom: '12px' }}>
@@ -350,7 +358,7 @@ const AuthForms = () => {
             </button>
             <h2 style={{ color: '#fff', fontWeight: '700', marginBottom: '6px' }}>Forgot Password?</h2>
             <p style={{ color: 'rgba(255,255,255,0.55)', fontSize: '0.875rem', marginBottom: '20px' }}>
-              Enter your registered email and we'll send you a reset code.
+              Enter your registered email address to receive a verification OTP.
             </p>
             <form onSubmit={handleForgotEmail} className="auth-form" noValidate>
               <div className="auth-field">
@@ -362,7 +370,7 @@ const AuthForms = () => {
               <MsgBox msg={error} isError />
               <MsgBox msg={success} isError={false} />
               <button type="submit" className="auth-submit" disabled={loading}>
-                {loading ? <span className="auth-spinner" /> : 'Send Reset Code'}
+                {loading ? <><span className="auth-btn-spinner" /> Sending Reset Code...</> : 'Send Reset Code'}
               </button>
             </form>
           </div>
@@ -370,11 +378,11 @@ const AuthForms = () => {
 
         {/* ── Forgot Password: Enter OTP + New Password ── */}
         {step === 'forgot-otp' && (
-          <div>
+          <div className="auth-form-step">
             <div style={{ fontSize: '2.5rem', textAlign: 'center', marginBottom: '8px' }}>🔒</div>
             <h2 style={{ color: '#fff', fontWeight: '700', marginBottom: '6px', textAlign: 'center' }}>Reset Password</h2>
             <p style={{ color: 'rgba(255,255,255,0.55)', fontSize: '0.875rem', marginBottom: '20px', textAlign: 'center' }}>
-              Enter the code sent to <strong style={{ color: 'rgba(99,179,237,0.9)' }}>{email}</strong>
+              Enter the code sent to <strong style={{ color: '#60a5fa' }}>{email}</strong>
             </p>
             <form onSubmit={handleResetPass} className="auth-form" noValidate>
               <OtpInput value={otp} onChange={setOtp} />
@@ -393,7 +401,7 @@ const AuthForms = () => {
               <MsgBox msg={success} isError={false} />
               <button type="submit" className="auth-submit"
                 disabled={loading || otp.replace(/\s/g, '').length < 6 || newPass.length < 8}>
-                {loading ? <span className="auth-spinner" /> : 'Reset Password'}
+                {loading ? <><span className="auth-btn-spinner" /> Resetting Password...</> : 'Reset Password'}
               </button>
             </form>
             {resendBtn(handleForgotEmail)}

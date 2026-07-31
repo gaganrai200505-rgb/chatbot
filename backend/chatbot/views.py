@@ -157,10 +157,9 @@ class ForgotPasswordView(APIView):
 
         user = User.objects.filter(email__iexact=email).first()
         if not user:
-            # Don't reveal whether email exists
             return Response(
-                {'message': 'If an account with that email exists, a reset OTP has been sent.'},
-                status=status.HTTP_200_OK
+                {'error': 'No user found with this email address.'},
+                status=status.HTTP_404_NOT_FOUND
             )
 
         try:

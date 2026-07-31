@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './AuthContext';
 import AuthForms from './AuthForms';
@@ -72,17 +73,24 @@ const CheckIconSmall = () => (
 const CustomDropdown = ({ options, value, onChange, icon, title, searchable = false, isState = false }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth <= 768);
   const dropdownRef = useRef(null);
 
   useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth <= 768);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  useEffect(() => {
     const handleClickOutside = (e) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
+      if (!isMobile && dropdownRef.current && !dropdownRef.current.contains(e.target)) {
         setIsOpen(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+  }, [isMobile]);
 
   const filteredOptions = options.filter(opt => {
     const text = typeof opt === 'string' ? opt : opt.label;
@@ -97,6 +105,76 @@ const CustomDropdown = ({ options, value, onChange, icon, title, searchable = fa
     ? selectedLabel.split(' ').slice(0, 2).join(' ')
     : selectedLabel;
 
+  const menuContent = (
+    <>
+      <div
+        className="dropdown-mobile-backdrop"
+        onClick={() => { setIsOpen(false); setSearch(''); }}
+      />
+      <div className={`custom-dropdown-menu ${isMobile ? 'mobile-sheet' : ''}`}>
+        <div className="mobile-sheet-header">
+          <div className="mobile-sheet-drag-handle" />
+          <div className="mobile-sheet-title-row">
+            <span className="mobile-sheet-title">
+              {isState ? '📍 Select State / Region' : '🌐 Select Language'}
+            </span>
+            <button
+              className="mobile-sheet-close-btn"
+              onClick={() => { setIsOpen(false); setSearch(''); }}
+              aria-label="Close"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+
+        {searchable && (
+          <div className="dropdown-search-box">
+            <SearchIcon />
+            <input
+              type="text"
+              className="dropdown-search-input"
+              placeholder="Search state..."
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              autoFocus
+              onClick={e => e.stopPropagation()}
+            />
+            {search && (
+              <button className="clear-search-btn" onClick={() => setSearch('')}>✕</button>
+            )}
+          </div>
+        )}
+
+        <div className="dropdown-options-list">
+          {filteredOptions.map((opt) => {
+            const val = typeof opt === 'string' ? opt : opt.value;
+            const lbl = typeof opt === 'string' ? opt : opt.label;
+            const isSelected = val === value;
+
+            return (
+              <div
+                key={val}
+                className={`dropdown-option-item ${isSelected ? 'selected' : ''}`}
+                onClick={() => {
+                  onChange(val);
+                  setIsOpen(false);
+                  setSearch('');
+                }}
+              >
+                <span className="option-label">{lbl}</span>
+                {isSelected && <CheckIconSmall />}
+              </div>
+            );
+          })}
+          {filteredOptions.length === 0 && (
+            <div className="dropdown-no-results">No match found</div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+
   return (
     <div className={`custom-dropdown-container ${isState ? 'state-dropdown' : ''}`} ref={dropdownRef} title={title}>
       <button
@@ -110,66 +188,7 @@ const CustomDropdown = ({ options, value, onChange, icon, title, searchable = fa
         <ChevronDownIcon className={`chevron-icon ${isOpen ? 'open' : ''}`} />
       </button>
 
-      {isOpen && (
-        <>
-          {/* Mobile dimmed backdrop */}
-          <div className="dropdown-mobile-backdrop" onClick={() => { setIsOpen(false); setSearch(''); }} />
-
-          <div className="custom-dropdown-menu">
-            {/* Mobile sheet header with drag handle */}
-            <div className="mobile-sheet-header">
-              <div className="mobile-sheet-drag-handle" />
-              <div className="mobile-sheet-title">
-                {isState ? '📍 Select State / Region' : '🌐 Select Language'}
-              </div>
-            </div>
-
-            {searchable && (
-              <div className="dropdown-search-box">
-                <SearchIcon />
-                <input
-                  type="text"
-                  className="dropdown-search-input"
-                  placeholder="Search state..."
-                  value={search}
-                  onChange={e => setSearch(e.target.value)}
-                  autoFocus
-                  onClick={e => e.stopPropagation()}
-                />
-                {search && (
-                  <button className="clear-search-btn" onClick={() => setSearch('')}>✕</button>
-                )}
-              </div>
-            )}
-
-            <div className="dropdown-options-list">
-            {filteredOptions.map((opt) => {
-              const val = typeof opt === 'string' ? opt : opt.value;
-              const lbl = typeof opt === 'string' ? opt : opt.label;
-              const isSelected = val === value;
-
-              return (
-                <div
-                  key={val}
-                  className={`dropdown-option-item ${isSelected ? 'selected' : ''}`}
-                  onClick={() => {
-                    onChange(val);
-                    setIsOpen(false);
-                    setSearch('');
-                  }}
-                >
-                  <span className="option-label">{lbl}</span>
-                  {isSelected && <CheckIconSmall />}
-                </div>
-              );
-            })}
-            {filteredOptions.length === 0 && (
-              <div className="dropdown-no-results">No match found</div>
-            )}
-          </div>
-        </div>
-        </>
-      )}
+      {isOpen && (isMobile ? createPortal(menuContent, document.body) : menuContent)}
     </div>
   );
 };
@@ -206,8 +225,8 @@ const BotLogoIcon = () => (
   </svg>
 );
 
-const LogoutIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+const LogoutIcon = ({ size = 16 }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none"
     stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
     <polyline points="16 17 21 12 16 7"/>
@@ -330,6 +349,91 @@ const groupSessionsByDate = (sessionsList) => {
 };
 
 /* ──────────────────────────────────────────────────────────────────────────
+ * Profile Modal & Logout Confirmation Modal
+ * ────────────────────────────────────────────────────────────────────────── */
+const ProfileModal = ({ isOpen, onClose, user, sessionsCount, onLogoutClick }) => {
+  if (!isOpen) return null;
+  const rawUsername = user?.username || 'User';
+  const isEmail = rawUsername.includes('@');
+  const userDisplayName = isEmail ? rawUsername.split('@')[0] : rawUsername;
+  const userEmail = isEmail ? rawUsername : `${rawUsername}@gmail.com`;
+  const userInitial = userDisplayName.charAt(0).toUpperCase();
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-card profile-modal-card" onClick={(e) => e.stopPropagation()}>
+        <button className="modal-close-btn" onClick={onClose} aria-label="Close profile">✕</button>
+
+        <div className="profile-header">
+          <div className="profile-avatar-large">{userInitial}</div>
+          <h2 className="profile-username">{userDisplayName}</h2>
+          <p className="profile-email-sub">{userEmail}</p>
+        </div>
+
+        <div className="profile-details-grid">
+          <div className="profile-detail-item">
+            <span className="detail-label">Username</span>
+            <span className="detail-value">{userDisplayName}</span>
+          </div>
+          <div className="profile-detail-item">
+            <span className="detail-label">Email Address</span>
+            <span className="detail-value">{userEmail}</span>
+          </div>
+        </div>
+
+        <div className="profile-actions">
+          <button
+            className="profile-logout-btn"
+            onClick={() => {
+              onClose();
+              onLogoutClick();
+            }}
+          >
+            <LogoutIcon size={16} /> Sign Out
+          </button>
+          <button className="profile-close-btn" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const LogoutConfirmModal = ({ isOpen, onClose, onConfirm }) => {
+  if (!isOpen) return null;
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-card confirm-modal-card" onClick={(e) => e.stopPropagation()}>
+        <div className="confirm-icon-wrap">
+          <LogoutIcon />
+        </div>
+        <h3 className="confirm-title">Sign Out of JanSeva AI?</h3>
+        <p className="confirm-desc">
+          Are you sure you want to sign out? You will need to enter your username and password again to access your chat history.
+        </p>
+
+        <div className="confirm-actions">
+          <button className="confirm-btn cancel" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            className="confirm-btn danger"
+            onClick={() => {
+              onClose();
+              onConfirm();
+            }}
+          >
+            Sign Out
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/* ──────────────────────────────────────────────────────────────────────────
  * Main Chat Page
  * ────────────────────────────────────────────────────────────────────────── */
 const ChatPage = () => {
@@ -344,6 +448,8 @@ const ChatPage = () => {
   const [editingTitle, setEditingTitle] = useState('');
   const [isWizardOpen, setIsWizardOpen] = useState(false);
   const [isSiriOpen, setIsSiriOpen] = useState(false);
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [isLogoutConfirmOpen, setIsLogoutConfirmOpen] = useState(false);
 
   const userInitial = user?.username ? user.username.charAt(0).toUpperCase() : 'U';
 
@@ -539,14 +645,23 @@ const ChatPage = () => {
         {/* User profile */}
         <div className="sidebar-footer">
           <div className="user-profile">
-            <div className="user-avatar">{userInitial}</div>
-            <div className="user-info">
-              <div className="user-name">{user?.username}</div>
-              <div className="user-role">Citizen Portal</div>
+            <div
+              className="user-profile-clickable"
+              onClick={() => setIsProfileOpen(true)}
+              title="View Profile Details"
+            >
+              <div className="user-avatar">{userInitial}</div>
+              <div className="user-info">
+                <div className="user-name">{user?.username}</div>
+                <div className="user-role">Citizen Portal</div>
+              </div>
             </div>
             <button
               className="logout-btn"
-              onClick={logout}
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsLogoutConfirmOpen(true);
+              }}
               title="Sign out"
               aria-label="Sign out"
             >
@@ -662,6 +777,22 @@ const ChatPage = () => {
           onSessionStarted={(newId) => setActiveSessionId(newId)}
           onMessageSent={handleMessageSent}
           username={user?.username}
+        />
+
+        {/* Profile Modal */}
+        <ProfileModal
+          isOpen={isProfileOpen}
+          onClose={() => setIsProfileOpen(false)}
+          user={user}
+          sessionsCount={sessions.length}
+          onLogoutClick={() => setIsLogoutConfirmOpen(true)}
+        />
+
+        {/* Logout Confirmation Modal */}
+        <LogoutConfirmModal
+          isOpen={isLogoutConfirmOpen}
+          onClose={() => setIsLogoutConfirmOpen(false)}
+          onConfirm={logout}
         />
       </main>
     </div>
