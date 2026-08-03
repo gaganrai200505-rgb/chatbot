@@ -55,3 +55,24 @@ class ChatMessageSerializer(serializers.ModelSerializer):
         model = ChatMessage
         fields = ['id', 'user', 'session_id', 'session_title', 'is_pinned', 'query', 'response', 'language', 'source', 'timestamp']
         read_only_fields = ('user', 'timestamp')
+
+
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from django.contrib.auth import authenticate
+
+class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    """
+    Custom Token Obtain Pair Serializer:
+    Supports logging in with Username (case-sensitive) or Registered Email (case-insensitive).
+    """
+    def validate(self, attrs):
+        username_or_email = str(attrs.get('username', '')).strip()
+        password = attrs.get('password', '')
+
+        user = authenticate(request=self.context.get('request'), username=username_or_email, password=password)
+        if not user:
+            raise serializers.ValidationError({'detail': 'No active account found with the given credentials.'})
+
+        attrs['username'] = user.username
+        return super().validate(attrs)
+

@@ -156,6 +156,11 @@ REST_FRAMEWORK = {
     },
 }
 
+AUTHENTICATION_BACKENDS = [
+    "chatbot.auth_backends.EmailOrUsernameModelBackend",
+    "django.contrib.auth.backends.ModelBackend",
+]
+
 # -------------------------------------------------------
 # Password Validation
 # -------------------------------------------------------

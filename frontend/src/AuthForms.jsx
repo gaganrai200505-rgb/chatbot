@@ -242,9 +242,9 @@ const AuthForms = () => {
             </div>
             <form onSubmit={handleLogin} className="auth-form" noValidate>
               <div className="auth-field">
-                <label htmlFor="l-user">Username</label>
+                <label htmlFor="l-user">Username or Email</label>
                 <input id="l-user" type="text" className="auth-input" value={username}
-                  onChange={e => setUsername(e.target.value)} placeholder="Enter your username"
+                  onChange={e => setUsername(e.target.value)} placeholder="Enter username or registered email"
                   required autoFocus autoComplete="username" />
               </div>
               <div className="auth-field">

@@ -15,7 +15,7 @@ from django.contrib.auth.models import User
 from django.db import transaction
 
 from .models import ChatMessage, OTPCode
-from .serializers import UserSerializer, ChatMessageSerializer, PasswordResetSerializer
+from .serializers import UserSerializer, ChatMessageSerializer, PasswordResetSerializer, CustomTokenObtainPairSerializer
 from .otp_utils import send_otp_email
 from .translation import detect_language, translate_to_english, translate_from_english
 from .rag_pipeline import get_rag_response
@@ -28,7 +28,9 @@ class ThrottledTokenObtainPairView(TokenObtainPairView):
     """
     POST /api/token/
     Obtains access and refresh tokens with rate limiting.
+    Supports login via Username (case-sensitive) or Registered Email (case-insensitive).
     """
+    serializer_class = CustomTokenObtainPairSerializer
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'auth'
 
