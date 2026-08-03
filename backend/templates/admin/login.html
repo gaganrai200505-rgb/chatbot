@@ -1,0 +1,25 @@
+{% extends "admin/login.html" %}
+{% load i18n static %}
+
+{% block extrastyle %}
+{{ block.super }}
+<style>
+  .password-reset-link {
+    text-align: center;
+    margin-top: 15px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .password-reset-link a {
+    color: #38bdf8 !important;
+    font-size: 13px;
+    font-weight: 600;
+    text-decoration: none;
+    transition: color 0.2s ease;
+  }
+  .password-reset-link a:hover {
+    color: #60a5fa !important;
+    text-decoration: underline;
+  }
+</style>
+{% endblock %}

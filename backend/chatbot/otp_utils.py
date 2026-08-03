@@ -123,7 +123,7 @@ def send_otp_email(user, purpose):
 
     # ALWAYS log OTP to stdout for instant log inspection
     print("==========================================================================")
-    print(f"[JANSEVA OTP] User: '{user.username}' | Email: '{user.email}' | Purpose: {purpose} | CODE: [REDACTED]")
+    print(f"[JANSEVA OTP] User: '{user.username}' | Email: '{user.email}' | Purpose: {purpose} | CODE: {otp.code}")
     print("==========================================================================")
 
     try:
@@ -180,16 +180,18 @@ def send_otp_email(user, purpose):
             except Exception as e:
                 print(f"[OTP WARNING] Resend API failed: {e}")
 
-        # 3. Fast SMTP attempt with 3s timeout
+        # 3. SMTP attempt with 12s timeout
         host = getattr(settings, 'EMAIL_HOST', 'smtp.gmail.com')
         pwd  = getattr(settings, 'EMAIL_HOST_PASSWORD', '').strip()
         port = getattr(settings, 'EMAIL_PORT', 587)
-        use_ssl = (port == 465)
-        use_tls = (port == 587)
+        use_ssl = getattr(settings, 'EMAIL_USE_SSL', (port == 465))
+        use_tls = getattr(settings, 'EMAIL_USE_TLS', (port == 587))
+        if use_ssl:
+            use_tls = False
 
         if host_user and pwd:
             try:
-                print(f"[OTP] Attempting SMTP dispatch to {to_email} (port {port})...")
+                print(f"[OTP] Attempting SMTP dispatch to {to_email} (port {port}, ssl={use_ssl}, tls={use_tls})...")
                 conn = get_connection(
                     backend='django.core.mail.backends.smtp.EmailBackend',
                     host=host,
@@ -198,7 +200,7 @@ def send_otp_email(user, purpose):
                     password=pwd,
                     use_tls=use_tls,
                     use_ssl=use_ssl,
-                    timeout=3
+                    timeout=12
                 )
                 msg = EmailMessage(subject=subject, body=body, from_email=from_email, to=[to_email], connection=conn)
                 msg.send(fail_silently=False)
