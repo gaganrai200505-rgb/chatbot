@@ -277,6 +277,14 @@ const EditIcon = () => (
   </svg>
 );
 
+const HomeIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+    <polyline points="9 22 9 12 15 12 15 22"></polyline>
+  </svg>
+);
+
 const TrashIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
     stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -707,11 +715,23 @@ const ChatPage = () => {
               className="sidebar-toggle"
               onClick={() => setSidebarOpen((o) => !o)}
               aria-label="Toggle sidebar"
+              title="Open Chat History Menu"
             >
               <MenuIcon />
             </button>
 
-            {/* Direct 1-tap New Chat button for Mobile & Quick Access */}
+            {/* Direct 1-tap Home / New Chat button */}
+            <button
+              className="mobile-home-back-btn"
+              onClick={handleNewChat}
+              title="Return to Home / Start New Chat"
+              aria-label="Home"
+            >
+              <HomeIcon />
+              <span className="home-btn-text">Home</span>
+            </button>
+
+            {/* Direct 1-tap New Chat button */}
             <button
               className="topbar-new-chat-btn"
               onClick={handleNewChat}
@@ -722,7 +742,9 @@ const ChatPage = () => {
               <span className="topbar-new-chat-label">New Chat</span>
             </button>
 
-            <span className="model-badge" onClick={handleNewChat} title="Return to Home / New Chat">JanSeva AI</span>
+            <span className="model-badge clickable-brand" onClick={handleNewChat} title="Return to Home / New Chat">
+              JanSeva AI
+            </span>
           </div>
 
           <div className="topbar-right">
