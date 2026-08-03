@@ -720,28 +720,6 @@ const ChatPage = () => {
               <MenuIcon />
             </button>
 
-            {/* Direct 1-tap Home / New Chat button */}
-            <button
-              className="mobile-home-back-btn"
-              onClick={handleNewChat}
-              title="Return to Home / Start New Chat"
-              aria-label="Home"
-            >
-              <HomeIcon />
-              <span className="home-btn-text">Home</span>
-            </button>
-
-            {/* Direct 1-tap New Chat button */}
-            <button
-              className="topbar-new-chat-btn"
-              onClick={handleNewChat}
-              title="Start New Chat"
-              aria-label="New Chat"
-            >
-              <PlusIcon />
-              <span className="topbar-new-chat-label">New Chat</span>
-            </button>
-
             <span className="model-badge clickable-brand" onClick={handleNewChat} title="Return to Home / New Chat">
               JanSeva AI
             </span>
