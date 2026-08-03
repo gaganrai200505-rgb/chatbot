@@ -53,5 +53,5 @@ class PasswordResetSerializer(serializers.Serializer):
 class ChatMessageSerializer(serializers.ModelSerializer):
     class Meta:
         model = ChatMessage
-        fields = '__all__'
+        fields = ['id', 'user', 'session_id', 'session_title', 'is_pinned', 'query', 'response', 'language', 'source', 'timestamp']
         read_only_fields = ('user', 'timestamp')

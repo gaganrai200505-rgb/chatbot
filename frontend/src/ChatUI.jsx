@@ -18,7 +18,15 @@ const GeminiSparkleIcon = ({ size = 20 }) => (
   </svg>
 );
 
-const BotIcon = () => <GeminiSparkleIcon size={20} />;
+const CivicEmblemIcon = ({ size = 24 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 21h18"/>
+    <path d="M5 21V7l7-4 7 4v14"/>
+    <path d="M9 10a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v11H9V10z"/>
+  </svg>
+);
+
+const BotIcon = () => <CivicEmblemIcon size={18} />;
 
 const SendIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
@@ -253,11 +261,99 @@ const getWelcomeMessage = (lang) => {
  * Suggestion prompts for welcome screen
  * ────────────────────────────────────────────────────────────────────────── */
 const SUGGESTIONS = [
-  { title: 'Ayushman Bharat', desc: 'How do I apply and get my health card?', prompt: 'How do I apply for Ayushman Bharat and get my health insurance card?' },
-  { title: 'PM Kisan Status', desc: 'Check my latest installment transfer', prompt: 'How can I check my PM Kisan payment status and latest installment?' },
-  { title: 'Ration Card', desc: 'Add family members or update address', prompt: 'How do I update my ration card to add family members or change address?' },
-  { title: 'Digital Education', desc: 'Free courses and certification schemes', prompt: 'What are the government schemes available for free digital education and certifications?' },
+  { title: 'Ayushman Bharat', desc: 'How do I apply for ₹5 Lakh health insurance card?', prompt: 'How do I apply for Ayushman Bharat and get my health insurance card?', icon: '🏥', badge: 'Popular Healthcare', featured: true },
+  { title: 'PM Kisan Installment', desc: 'Check latest 2026 payment transfer status', prompt: 'How can I check my PM Kisan payment status and latest installment?', icon: '🌾', badge: 'Agriculture Grant' },
+  { title: 'Ration Card Update', desc: 'Add family members or transfer address', prompt: 'How do I update my ration card to add family members or change address?', icon: '📄', badge: 'Essential Welfare' },
+  { title: 'Digital Education', desc: 'Free skill courses & student certifications', prompt: 'What are the government schemes available for free digital education and certifications?', icon: '🎓', badge: 'Education' },
 ];
+
+
+const RECOMMENDED_SCHEMES = [
+  {
+    title: 'PM Kisan Samman Nidhi',
+    category: 'Agriculture',
+    benefit: '₹6,000 / year direct transfer',
+    prompt: 'Tell me about PM Kisan Samman Nidhi eligibility and application deadline 2026',
+    bgImg: '/agriculture_bg.png',
+  },
+  {
+    title: 'Ayushman Bharat (PM-JAY)',
+    category: 'Healthcare',
+    benefit: '₹5 Lakh health cover / family',
+    prompt: 'How can I apply for Ayushman Bharat Golden Card and check hospital list?',
+    bgImg: '/healthcare_bg.png',
+  },
+  {
+    title: 'PM Awas Yojana (PMAY)',
+    category: 'Housing',
+    benefit: 'Up to ₹1.2 Lakh housing subsidy',
+    prompt: 'What are the eligibility rules and latest date for PM Awas Yojana rural housing subsidy?',
+    bgImg: '/solar_bg.png',
+  },
+  {
+    title: 'National Scholarship Portal',
+    category: 'Education',
+    benefit: 'Tuition & stipend support',
+    prompt: 'What NSP post-matric scholarships are active right now for students?',
+    bgImg: '/education_bg.png',
+  },
+  {
+    title: 'PM Mudra Yojana',
+    category: 'Business',
+    benefit: 'Collateral-free loan up to ₹10 Lakh',
+    prompt: 'How to get Mudra Shishu or Kishor loan for micro business setup?',
+    bgImg: '/healthcare_bg.png',
+  },
+  {
+    title: 'Sukanya Samriddhi Yojana',
+    category: 'Welfare',
+    benefit: '8.2% interest tax-free savings',
+    prompt: 'Explain Sukanya Samriddhi account opening rules and tax benefits for girl child',
+    bgImg: '/education_bg.png',
+  },
+  {
+    title: 'PM SVANidhi',
+    category: 'Micro-Credit',
+    benefit: 'Working capital loan up to ₹50k',
+    prompt: 'How street vendors can get digital cashback and PM SVANidhi loans',
+    bgImg: '/solar_bg.png',
+  },
+];
+
+const TRENDING_NEW_SCHEMES = [
+  {
+    title: 'PM Surya Ghar: Muft Bijli Yojana',
+    subtitle: '300 Units Free Electricity + ₹78,000 Subsidy',
+    desc: 'Get rooftop solar panels installed on your home with 60% central government subsidy.',
+    prompt: 'How to apply for PM Surya Ghar Muft Bijli Yojana solar rooftop subsidy and eligibility?',
+    bgImg: '/solar_bg.png',
+  },
+  {
+    title: 'PM Vishwakarma Yojana',
+    subtitle: '₹3 Lakh Loan @ 5% + ₹15,000 Toolkit Voucher',
+    desc: 'Financial support, advanced skill training, and modern tools for traditional artisans & craftspeople.',
+    prompt: 'Who qualifies for PM Vishwakarma scheme and how to claim ₹15,000 toolkit voucher?',
+    bgImg: '/education_bg.png',
+  },
+  {
+    title: 'Lakhpati Didi Scheme',
+    subtitle: 'Micro-Credit & Skill Training for Women',
+    desc: 'Entrepreneurship training in LED bulb manufacturing, drone operation, and tailoring for SHG women.',
+    prompt: 'How rural SHG women can join Lakhpati Didi scheme to start a small business?',
+    bgImg: '/agriculture_bg.png',
+  },
+  {
+    title: 'PM-PRANAM Scheme',
+    subtitle: 'Bio-Fertilizers & Soil Health Grants',
+    desc: 'State government incentive grants for farmers adopting organic and sustainable agriculture.',
+    prompt: 'What are the benefits and application process for PM PRANAM organic farming subsidy?',
+    bgImg: '/agriculture_bg.png',
+  },
+];
+
+
+
+
 
 /* ──────────────────────────────────────────────────────────────────────────
  * Markdown-lite renderer with Portal Action Buttons
@@ -394,12 +490,26 @@ const ChatUI = ({ sessionId, initialMessages = [], onSessionStarted, language, s
   const currentSessionIdRef = useRef(sessionId);
 
   const [copiedMsgId, setCopiedMsgId] = useState(null);
+  const [trendingSchemes, setTrendingSchemes] = useState(TRENDING_NEW_SCHEMES);
+
+  useEffect(() => {
+    // Fetch live automatically updated 2026 government schemes from backend endpoint
+    fetch('/api/trending-schemes/')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data && Array.isArray(data) && data.length > 0) {
+          setTrendingSchemes(data);
+        }
+      })
+      .catch((err) => console.log('[ChatUI] Dynamic schemes fetch fallback:', err));
+  }, []);
 
   const handleCopyMessage = (text, id) => {
     navigator.clipboard.writeText(text);
     setCopiedMsgId(id);
     setTimeout(() => setCopiedMsgId(null), 2000);
   };
+
 
   useEffect(() => {
     currentSessionIdRef.current = sessionId;
@@ -514,31 +624,100 @@ const ChatUI = ({ sessionId, initialMessages = [], onSessionStarted, language, s
       {/* ── Chat messages OR welcome state ── */}
       <div className="chat-area">
         {!hasMessages ? (
-          /* Welcome / empty state — Google Gemini Style */
+          /* Welcome / empty state — Human-Centric Bespoke Style */
           <div className="welcome-state">
-            <div className="welcome-icon gemini-sparkle-hero">
-              <GeminiSparkleIcon size={44} />
+            <div className="welcome-trust-pill">
+              <span className="trust-dot"></span>
+              <span>🇮🇳 Official Indian Public Welfare Portal • Direct Benefit Transfer (DBT) Verified</span>
             </div>
+
+            <div className="welcome-icon civic-hero-icon">
+              <CivicEmblemIcon size={44} />
+            </div>
+
             <h2 className="welcome-heading">
-              <span className="gemini-gradient-text">Hello, {username || 'Citizen'}</span>
+              <span className="civic-heading-text">Namaste, {username || 'Citizen'}</span>
             </h2>
             <p className="welcome-sub">
-              How can I help you discover Indian government schemes today?
+              Search verified central & state government schemes, application deadlines, and eligibility criteria.
             </p>
 
-            <div className="suggestions-grid">
-              {SUGGESTIONS.map((s) => (
-                <button
-                  key={s.title}
-                  className="suggestion-card"
-                  onClick={() => handleSend(s.prompt)}
-                >
-                  <div className="suggestion-card-title">{s.title}</div>
-                  <div className="suggestion-card-desc">{s.desc}</div>
-                </button>
-              ))}
+
+
+            {/* ── Recommended Schemes Carousel ── */}
+            <div className="recommended-schemes-section">
+              <div className="recommended-schemes-header">
+                <div className="recommended-title">
+                  <span>Recommended Schemes</span>
+                </div>
+                <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>Hover to pause • Tap to select</span>
+              </div>
+
+              <div className="recommended-marquee-container">
+                <div className="recommended-marquee-track">
+                  {/* Render list twice for seamless 360 infinite loop */}
+                  {[...RECOMMENDED_SCHEMES, ...RECOMMENDED_SCHEMES].map((scheme, idx) => (
+                    <div
+                      key={`${scheme.title}-${idx}`}
+                      className="recommended-scheme-card"
+                      style={{
+                        backgroundImage: `linear-gradient(180deg, rgba(7, 13, 24, 0.25) 0%, rgba(7, 13, 24, 0.75) 100%), url(${scheme.bgImg})`,
+                        backgroundSize: 'cover',
+                        backgroundPosition: 'center',
+                      }}
+                      onClick={() => handleSend(scheme.prompt)}
+                    >
+                      <div>
+                        <span className="rec-card-category">{scheme.category}</span>
+                        <div className="rec-card-title">{scheme.title}</div>
+                      </div>
+                      <div className="rec-card-benefit">
+                        <span>{scheme.benefit}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* ── Trending & Key Schemes Section ── */}
+            <div className="trending-schemes-section">
+              <div className="trending-section-header">
+                <h3 className="trending-title">Key Government Initiatives</h3>
+                <p className="trending-subtitle">Featured subsidies and central welfare assistance</p>
+              </div>
+
+              <div className="trending-cards-grid">
+                {trendingSchemes.map((scheme) => (
+                  <div
+
+                    key={scheme.title}
+                    className="trending-scheme-card"
+                    style={{
+                      backgroundImage: `linear-gradient(180deg, rgba(7, 13, 24, 0.25) 0%, rgba(7, 13, 24, 0.82) 100%), url(${scheme.bgImg})`,
+                      backgroundSize: 'cover',
+                      backgroundPosition: 'center',
+                    }}
+                    onClick={() => handleSend(scheme.prompt)}
+                  >
+
+                    <div>
+                      <h4 className="trending-card-title">{scheme.title}</h4>
+                      <div className="trending-card-sub">{scheme.subtitle}</div>
+                      <p className="trending-card-desc">{scheme.desc}</p>
+                    </div>
+                    <div className="trending-card-action">
+                      <span>Explore Scheme Details →</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
+
+
+
+
         ) : (
           /* Message thread */
           <div className="messages-container">

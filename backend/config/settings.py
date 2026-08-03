@@ -152,6 +152,7 @@ REST_FRAMEWORK = {
         "anon": "30/minute",
         "user": "120/minute",
         "auth": "10/minute",
+        "tts": "60/minute",
     },
 }
 
@@ -206,9 +207,17 @@ MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # -------------------------------------------------------
-# Groq API Key (read from .env)
+# API Keys (read from .env)
 # -------------------------------------------------------
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
+
+# Gemini 2.0 Multimodal Live model for native voice-to-voice.
+# Overridable via GEMINI_LIVE_MODEL env var; defaults to the stable
+# Live model (the "exp" preview was retired). The frontend also
+# maintains a client-side fallback chain in geminiLiveWebSocket.js.
+GEMINI_LIVE_MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-2.0-flash-live-001")
 
 # -------------------------------------------------------
 # Email (Gmail SMTP) — for OTP verification & password reset

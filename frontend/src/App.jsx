@@ -9,6 +9,14 @@ import { fetchChatHistory, deleteChatSession, updateChatSession } from './api';
 import EligibilityModal from './EligibilityModal';
 import SiriVoiceModal from './SiriVoiceModal';
 
+const CivicEmblemIcon = ({ size = 20 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 21h18"/>
+    <path d="M5 21V7l7-4 7 4v14"/>
+    <path d="M9 10a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v11H9V10z"/>
+  </svg>
+);
+
 const GeminiSparkleIcon = ({ size = 20 }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
     <path fillRule="evenodd" clipRule="evenodd" d="M12 0C12 6.62742 6.62742 12 0 12C6.62742 12 12 17.3726 12 24C12 17.3726 17.3726 12 24 12C17.3726 12 12 6.62742 12 0Z" fill="url(#gemini_sparkle_grad)" />
@@ -382,6 +390,7 @@ const ProfileModal = ({ isOpen, onClose, user, sessionsCount, onLogoutClick }) =
         </div>
 
         <div className="profile-actions">
+
           <button
             className="profile-logout-btn"
             onClick={() => {
@@ -399,6 +408,7 @@ const ProfileModal = ({ isOpen, onClose, user, sessionsCount, onLogoutClick }) =
     </div>
   );
 };
+
 
 const LogoutConfirmModal = ({ isOpen, onClose, onConfirm }) => {
   if (!isOpen) return null;
@@ -469,9 +479,17 @@ const ChatPage = () => {
   }, []);
 
   const handleNewChat = () => {
-    setActiveSessionId(null);
-    setSidebarOpen(false);
+    if (document.startViewTransition) {
+      document.startViewTransition(() => {
+        setActiveSessionId(null);
+        setSidebarOpen(false);
+      });
+    } else {
+      setActiveSessionId(null);
+      setSidebarOpen(false);
+    }
   };
+
 
   // Delete chat session handler with optimistic state update
   const handleDeleteSession = async (e, sessionId) => {
@@ -538,7 +556,7 @@ const ChatPage = () => {
         <div className="sidebar-top">
           <div className="sidebar-brandmark">
             <div className="sidebar-logo-icon">
-              <GeminiSparkleIcon size={22} />
+              <CivicEmblemIcon size={22} />
             </div>
             <span className="sidebar-app-name">JanSeva AI</span>
             <button
@@ -704,7 +722,7 @@ const ChatPage = () => {
               <span className="topbar-new-chat-label">New Chat</span>
             </button>
 
-            <span className="model-badge">JanSeva AI</span>
+            <span className="model-badge" onClick={handleNewChat} title="Return to Home / New Chat">JanSeva AI</span>
           </div>
 
           <div className="topbar-right">
@@ -777,6 +795,7 @@ const ChatPage = () => {
           onSessionStarted={(newId) => setActiveSessionId(newId)}
           onMessageSent={handleMessageSent}
           username={user?.username}
+          onNewChat={handleNewChat}
         />
 
         {/* Profile Modal */}
@@ -794,6 +813,8 @@ const ChatPage = () => {
           onClose={() => setIsLogoutConfirmOpen(false)}
           onConfirm={logout}
         />
+
+
       </main>
     </div>
   );

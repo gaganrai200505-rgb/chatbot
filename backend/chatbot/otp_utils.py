@@ -6,7 +6,7 @@ Logs the generated OTP clearly to server stdout so it can be read from Render lo
 Returns the created OTP object so user accounts are registered in inactive state (is_active=False)
 pending OTP verification.
 """
-import random
+import secrets
 import string
 import re
 import json
@@ -20,7 +20,7 @@ from .models import OTPCode
 
 def generate_otp(length=6):
     """Generate a cryptographically random 6-digit numeric OTP."""
-    return ''.join(random.choices(string.digits, k=length))
+    return ''.join(str(secrets.randbelow(10)) for _ in range(length))
 
 
 def create_otp(user, purpose):
@@ -123,7 +123,7 @@ def send_otp_email(user, purpose):
 
     # ALWAYS log OTP to stdout for instant log inspection
     print("==========================================================================")
-    print(f"[JANSEVA OTP] User: '{user.username}' | Email: '{user.email}' | Purpose: {purpose} | CODE: {otp.code}")
+    print(f"[JANSEVA OTP] User: '{user.username}' | Email: '{user.email}' | Purpose: {purpose} | CODE: [REDACTED]")
     print("==========================================================================")
 
     try:

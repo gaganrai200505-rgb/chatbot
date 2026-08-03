@@ -22,6 +22,7 @@ SIMILARITY THRESHOLD:
   - Score ≤ 0.75 → Poor match → Web search fallback
 """
 
+import re
 from groq import Groq
 from django.conf import settings
 
@@ -58,14 +59,12 @@ def _call_groq_with_fallback(messages, max_tokens=None, temperature=None, prefer
         # Voice mode: prioritise ultra-low-latency 8B model
         models_to_try = [
             "llama-3.1-8b-instant",
-            "gemma2-9b-it",
             "llama-3.3-70b-versatile",
         ]
     else:
         models_to_try = [
             "llama-3.3-70b-versatile",
             "llama-3.1-8b-instant",
-            "gemma2-9b-it",
         ]
 
     last_error = None
@@ -83,7 +82,9 @@ def _call_groq_with_fallback(messages, max_tokens=None, temperature=None, prefer
             last_error = e
             print(f"[RAG] Groq model '{model_name}' rate limit or error ({e}). Trying fallback model...")
 
-    raise last_error
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("All Groq API models failed.")
 
 
 def _call_groq_stream_with_fallback(messages, max_tokens=None, temperature=None, prefer_fast: bool = False):
@@ -93,12 +94,10 @@ def _call_groq_stream_with_fallback(messages, max_tokens=None, temperature=None,
     client = _get_groq_client()
     models_to_try = [
         "llama-3.1-8b-instant",
-        "gemma2-9b-it",
         "llama-3.3-70b-versatile",
     ] if prefer_fast else [
         "llama-3.3-70b-versatile",
         "llama-3.1-8b-instant",
-        "gemma2-9b-it",
     ]
 
     last_error = None
@@ -165,33 +164,51 @@ def retrieve_from_knowledge_base(query_english: str):
         return [], 0.0
 
 
+import datetime
+
+def is_deadline_query(query: str) -> bool:
+    """
+    Detects if the user's question is asking about application deadlines,
+    last dates, due dates, expiry, or whether an application window is open.
+    """
+    import re
+    q = query.lower()
+    deadline_patterns = [
+        r'\bdeadline\b', r'\blast date\b', r'\bclosing date\b', r'\bend date\b',
+        r'\bdue date\b', r'\btill when\b', r'\bwhen is the last\b', r'\bwhen to apply\b',
+        r'\bis it open\b', r'\bis application open\b', r'\blast day\b',
+        r'\bextended date\b', r'\blatest deadline\b', r'\bupcoming deadline\b',
+        r'\bexpiry\b', r'\blast date to apply\b', r'\bapplication deadline\b'
+    ]
+    for pattern in deadline_patterns:
+        if re.search(pattern, q):
+            return True
+    return False
+
 # -------------------------------------------------------
 # Build Prompts
 # -------------------------------------------------------
 def _build_kb_prompt(query: str, matched_schemes: list, web_results: str = "") -> str:
     """
     Build a prompt using knowledge base context, enriched with web search context if available.
-
-    Args:
-        query:           The original query (English)
-        matched_schemes: The list of matched scheme dictionaries
-        web_results:     Optional additional search results from web
-
-    Returns:
-        A formatted prompt string
     """
+    today_str = datetime.datetime.now().strftime("%d %B %Y")
     combined_context = ""
     for idx, scheme in enumerate(matched_schemes):
         combined_context += f"--- Scheme {idx + 1}: {scheme['title']} ---\n"
         combined_context += f"Description: {scheme['description']}\n"
+        combined_context += f"Application Deadline: {scheme.get('application_deadline', 'Ongoing / Open')}\n"
+        combined_context += f"Portal Active: {scheme.get('is_active', True)}\n"
         combined_context += f"Key Details:\n{scheme.get('details', '')}\n\n"
 
     web_context_str = ""
     if web_results:
-        web_context_str = f"\nADDITIONAL WEB SEARCH CONTEXT:\n{web_results}\n"
+        web_context_str = f"\nADDITIONAL LIVE WEB SEARCH CONTEXT:\n{web_results}\n"
 
     return f"""You are an authoritative government scheme assistant for Indian citizens. 
 Answer the user's question about government schemes accurately, comprehensively, and clearly.
+
+TODAY'S DATE: {today_str}
 
 PRIMARY SCHEME CONTEXT FROM KNOWLEDGE BASE:
 {combined_context}
@@ -200,7 +217,10 @@ USER QUESTION: {query}
 
 IMPORTANT INSTRUCTIONS:
 Please construct your answer using EXACTLY the following structure with Markdown headings.
-Use the primary scheme context as your foundational source. If any section (such as Documents Required, Eligibility, or Step-by-Step Application process) is incomplete in the knowledge base, use the additional web context and your verified knowledge about official Indian Government schemes to fill in all missing details. NEVER output "Information not available"; always provide helpful, complete, and accurate information for all four sections.
+Use the primary scheme context as your foundational source. If any section is incomplete in the knowledge base, use the additional live web context and your verified knowledge about official Indian Government schemes to fill in all missing details. ALWAYS provide helpful, complete, and accurate information.
+
+APPLICATION DEADLINES & LATEST UPDATES:
+Always evaluate application deadlines relative to TODAY'S DATE ({today_str}). Specify whether applications are currently Open, Closing Soon, Ongoing, or Closed.
 
 INTERACTIVE ELIGIBILITY CHECK:
 If the user asks whether they are eligible for the scheme but crucial details (like age, land holding, annual income, or category) are missing from the conversation, include 1-2 friendly interactive follow-up questions at the end asking for those details so you can calculate their exact eligibility for them.
@@ -212,6 +232,9 @@ Under "**How to Apply:**" or when referencing application steps, ALWAYS include 
 **Scheme Details:**
 (Provide a comprehensive overview, key benefits, and official department)
 
+**Application Deadline & Status:**
+(State the exact deadline date or whether applications are currently Open/Closing Soon/Ongoing, along with any recent official extension details)
+
 **Eligibility Criteria:**
 (Provide clear, bulleted eligibility conditions)
 
@@ -219,7 +242,7 @@ Under "**How to Apply:**" or when referencing application steps, ALWAYS include 
 (Provide clear step-by-step instructions or modes of application with official .gov.in portal links)
 
 **Documents Required:**
-(List out all required documents in bullet points, such as Aadhaar Card, Income Certificate, Caste Certificate, Ration Card, Bank Passbook, etc.)
+(List out all required documents in bullet points)
 """
 
 
@@ -227,7 +250,10 @@ def _build_web_prompt(query: str, web_results: str) -> str:
     """
     Build a prompt using web search results with strict domain guardrails.
     """
+    today_str = datetime.datetime.now().strftime("%d %B %Y")
     return f"""You are JanSeva AI, specialized EXCLUSIVELY in Indian Central and State Government schemes, welfare programs, scholarships, health insurance, pensions, subsidies, and public services.
+
+TODAY'S DATE: {today_str}
 
 WEB SEARCH CONTEXT:
 {web_results}
@@ -236,13 +262,16 @@ USER QUESTION: {query}
 
 IMPORTANT INSTRUCTIONS:
 1. IF USER QUESTION IS ABOUT A VALID GOVERNMENT SCHEME OR PUBLIC SERVICE:
-   Start your response IMMEDIATELY with "**Scheme Details:**" and provide the 4 sections below.
-2. IF USER QUESTION IS OFF-TOPIC OR NON-GOVERNMENT (e.g. asking about a celebrity, cricketer, actor, movie, sports star, general topic):
-   DO NOT use the 4-section scheme template. Respond ONLY with:
+   Start your response IMMEDIATELY with "**Scheme Details:**" and provide the sections below. Always evaluate deadlines against TODAY'S DATE ({today_str}).
+2. IF USER QUESTION IS OFF-TOPIC OR NON-GOVERNMENT:
+   DO NOT use the scheme template. Respond ONLY with:
    "I am JanSeva AI, specialized strictly in Indian Government schemes and welfare services. Please ask me any question about government schemes like Ayushman Bharat, PM Kisan, NSP scholarships, or state welfare programs!"
 
 **Scheme Details:**
 (Provide a comprehensive overview, key benefits, and official department)
+
+**Application Deadline & Status:**
+(State the exact deadline date or whether applications are currently Open/Closing Soon/Ongoing, along with any recent official extension details)
 
 **Eligibility Criteria:**
 (Provide clear, bulleted eligibility conditions)
@@ -257,19 +286,25 @@ IMPORTANT INSTRUCTIONS:
 
 def _build_fallback_prompt(query: str) -> str:
     """Build a prompt allowing LLM to answer from its internal knowledge securely with domain guardrails."""
+    today_str = datetime.datetime.now().strftime("%d %B %Y")
     return f"""You are JanSeva AI, specialized EXCLUSIVELY in Indian Central and State Government schemes, welfare programs, scholarships, health insurance, pensions, subsidies, and public services.
+
+TODAY'S DATE: {today_str}
 
 USER QUESTION: {query}
 
 IMPORTANT INSTRUCTIONS:
 1. IF USER QUESTION IS ABOUT A VALID GOVERNMENT SCHEME OR PUBLIC SERVICE:
-   Start your response IMMEDIATELY with "**Scheme Details:**" and provide the 4 sections below.
-2. IF USER QUESTION IS OFF-TOPIC OR NON-GOVERNMENT (e.g. asking about a celebrity, cricketer, actor, movie, sports star, general topic):
-   DO NOT use the 4-section scheme template. Respond ONLY with:
+   Start your response IMMEDIATELY with "**Scheme Details:**" and provide the sections below. Always evaluate deadlines against TODAY'S DATE ({today_str}).
+2. IF USER QUESTION IS OFF-TOPIC OR NON-GOVERNMENT:
+   DO NOT use the scheme template. Respond ONLY with:
    "I am JanSeva AI, specialized strictly in Indian Government schemes and welfare services. Please ask me any question about government schemes like Ayushman Bharat, PM Kisan, NSP scholarships, or state welfare programs!"
 
 **Scheme Details:**
 (Provide a comprehensive overview, exact benefits, and official department)
+
+**Application Deadline & Status:**
+(State the exact deadline date or whether applications are currently Open/Closing Soon/Ongoing, along with any recent official extension details)
 
 **Eligibility Criteria:**
 (Provide clear, bulleted eligibility conditions)
@@ -282,6 +317,7 @@ IMPORTANT INSTRUCTIONS:
 """
 
 
+
 def is_conversational_ack(query: str) -> bool:
     """
     Detects acknowledgments, greetings, audio checks ('can you hear me', 'hello'),
@@ -290,6 +326,19 @@ def is_conversational_ack(query: str) -> bool:
     """
     import re
     q_clean = re.sub(r'[^\w\s]', '', query.lower()).strip()
+    if not q_clean:
+        return True
+
+    # Safety guard: if query contains government scheme keywords, it is NOT an ack/greeting!
+    govt_keywords = {
+        'scheme', 'yojana', 'kisan', 'ration', 'card', 'pension', 'housing',
+        'apply', 'eligibility', 'eligible', 'subsidy', 'income', 'bpl', 'aadhaar',
+        'loan', 'scholarship', 'certificate', 'portal', 'benefits', 'ayushman',
+        'pm', 'documents', 'register', 'status', 'form', 'registration', 'rasan', 'rahan'
+    }
+    words = set(q_clean.split())
+    if words & govt_keywords:
+        return False
 
     # Direct conversational / audio check / greeting phrases
     conversational_phrases = [
@@ -305,9 +354,11 @@ def is_conversational_ack(query: str) -> bool:
         r'right\b', r'sure\b', r'definitely\b', r'confirmed\b',
     ]
 
-    for pattern in conversational_phrases:
-        if re.search(pattern, q_clean):
-            return True
+    # Only perform conversational regex checks if query is 4 words or fewer
+    if len(words) <= 4:
+        for pattern in conversational_phrases:
+            if re.search(pattern, q_clean):
+                return True
 
     ack_words = {
         'ok', 'okay', 'k', 'kk', 'thanks', 'thank you', 'thx', 'thankyou',
@@ -597,7 +648,7 @@ def get_rag_response(query_english: str, original_query: str, chat_history: list
             res = client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
                 model="llama-3.1-8b-instant" if is_voice_mode else "llama-3.3-70b-versatile",
-                max_tokens=40
+                max_tokens=120
             )
             return {
                 "response": res.choices[0].message.content.strip(),
@@ -627,28 +678,37 @@ def get_rag_response(query_english: str, original_query: str, chat_history: list
         print(f"[RAG] State filter applied: '{effective_state}' -> Search query: '{search_query}'")
 
     is_direct_q = is_specific_question(query_english, chat_history) or is_voice_mode
+    is_deadline_q = is_deadline_query(query_english) or is_deadline_query(original_query)
     matched_scheme, score = retrieve_from_knowledge_base(search_query)
+
+    if is_deadline_q:
+        deadline_search_query = f"{search_query} last date application deadline 2026 official portal notification"
+        print(f"[RAG Deadline] Triggering live deadline web search: '{deadline_search_query}'")
+        web_results = search_web(deadline_search_query)
 
     if is_voice_mode:
         if matched_scheme and score >= 0.55:
-            kb_context_str = "\n".join([f"Scheme: {s['title']} (State/Dept: {s.get('state', 'All India')})\nDescription: {s['description']}\nDetails: {s.get('details','')}" for s in matched_scheme[:2]])
+            kb_context_str = "\n".join([f"Scheme: {s['title']} (Deadline: {s.get('application_deadline', 'Ongoing')})\nDescription: {s['description']}\nDetails: {s.get('details','')}" for s in matched_scheme[:2]])
             prompt = _build_voice_companion_prompt(query_english, kb_context_str, target_lang=target_lang)
             source = "knowledge_base"
         else:
-            web_results = search_web(search_query)
+            web_results = search_web(search_query) if not is_deadline_q else web_results
             prompt = _build_voice_companion_prompt(query_english, context=web_results, target_lang=target_lang)
             source = "web"
     elif matched_scheme:
-        web_results = "" if score >= 0.55 else search_web(search_query)
-        kb_context_str = "\n".join([f"{s['title']}: {s['description']}\n{s.get('details','')}" for s in matched_scheme])
-        if is_direct_q:
+        if is_deadline_q:
+            web_results = search_web(f"{search_query} deadline 2026 official portal") if not 'web_results' in locals() or not web_results else web_results
+        else:
+            web_results = "" if score >= 0.55 else search_web(search_query)
+        kb_context_str = "\n".join([f"{s['title']} (Application Deadline: {s.get('application_deadline', 'Ongoing')}): {s['description']}\n{s.get('details','')}" for s in matched_scheme])
+        if is_direct_q and not is_deadline_q:
             prompt = _build_direct_answer_prompt(query_english, kb_context_str, web_results=web_results, search_query=search_query)
         else:
             prompt = _build_kb_prompt(search_query, matched_scheme, web_results=web_results)
         source = "knowledge_base"
     else:
-        web_results = search_web(search_query)
-        if is_direct_q:
+        web_results = search_web(f"{search_query} deadline 2026 official portal") if (is_deadline_q and ('web_results' not in locals() or not web_results)) else (web_results if 'web_results' in locals() else search_web(search_query))
+        if is_direct_q and not is_deadline_q:
             prompt = _build_direct_answer_prompt(query_english, web_results or search_query, web_results=web_results, search_query=search_query)
             source = "web"
         elif web_results:
@@ -660,7 +720,7 @@ def get_rag_response(query_english: str, original_query: str, chat_history: list
 
     messages_payload = [{"role": "user", "content": prompt}]
     try:
-        max_t = 280 if is_voice_mode else None
+        max_t = 650 if is_voice_mode else 1200
         answer = _call_groq_with_fallback(
             messages=messages_payload,
             max_tokens=max_t,
@@ -688,7 +748,7 @@ def get_rag_response_stream(query_english: str, original_query: str, chat_histor
     if is_conversational_ack(query_english):
         try:
             prompt = _build_conversational_ack_prompt(query_english, chat_history=chat_history, target_lang=target_lang)
-            for token in _call_groq_stream_with_fallback([{"role": "user", "content": prompt}], max_tokens=35, prefer_fast=is_voice_mode):
+            for token in _call_groq_stream_with_fallback([{"role": "user", "content": prompt}], max_tokens=120, prefer_fast=is_voice_mode):
                 yield token
             return
         except Exception:
@@ -727,25 +787,34 @@ def get_rag_response_stream(query_english: str, original_query: str, chat_histor
         print(f"[RAG Stream] State filter applied: '{effective_state}' -> Search query: '{search_query}'")
 
     is_direct_q = is_specific_question(query_english, chat_history) or is_voice_mode
+    is_deadline_q = is_deadline_query(query_english) or is_deadline_query(original_query)
     matched_scheme, score = retrieve_from_knowledge_base(search_query)
 
+    if is_deadline_q:
+        deadline_search_query = f"{search_query} last date application deadline 2026 official portal notification"
+        print(f"[RAG Stream Deadline] Triggering live deadline web search: '{deadline_search_query}'")
+        web_results = search_web(deadline_search_query)
+
     if is_voice_mode:
-        if matched_scheme and score >= 0.35:
-            kb_context_str = "\n".join([f"Scheme: {s['title']} (State/Dept: {s.get('state', 'All India')})\nDescription: {s['description']}\nDetails: {s.get('details','')}" for s in matched_scheme[:2]])
+        if matched_scheme and score >= 0.55:
+            kb_context_str = "\n".join([f"Scheme: {s['title']} (Deadline: {s.get('application_deadline', 'Ongoing')})\nDescription: {s['description']}\nDetails: {s.get('details','')}" for s in matched_scheme[:2]])
             prompt = _build_voice_companion_prompt(query_english, kb_context_str, target_lang=target_lang, chat_history=chat_history)
         else:
-            web_results = search_web(search_query)
+            web_results = search_web(search_query) if not is_deadline_q else web_results
             prompt = _build_voice_companion_prompt(query_english, context=web_results, target_lang=target_lang, chat_history=chat_history)
     elif matched_scheme:
-        web_results = "" if score >= 0.60 else search_web(search_query)
-        kb_context_str = "\n".join([f"{s['title']}: {s['description']}\n{s.get('details','')}" for s in matched_scheme])
-        if is_direct_q:
+        if is_deadline_q:
+            web_results = search_web(f"{search_query} deadline 2026 official portal") if not 'web_results' in locals() or not web_results else web_results
+        else:
+            web_results = "" if score >= 0.60 else search_web(search_query)
+        kb_context_str = "\n".join([f"{s['title']} (Application Deadline: {s.get('application_deadline', 'Ongoing')}): {s['description']}\n{s.get('details','')}" for s in matched_scheme])
+        if is_direct_q and not is_deadline_q:
             prompt = _build_direct_answer_prompt(query_english, kb_context_str, web_results=web_results, search_query=search_query)
         else:
             prompt = _build_kb_prompt(search_query, matched_scheme, web_results=web_results)
     else:
-        web_results = search_web(search_query)
-        if is_direct_q:
+        web_results = search_web(f"{search_query} deadline 2026 official portal") if (is_deadline_q and ('web_results' not in locals() or not web_results)) else (web_results if 'web_results' in locals() else search_web(search_query))
+        if is_direct_q and not is_deadline_q:
             prompt = _build_direct_answer_prompt(query_english, web_results or search_query, web_results=web_results, search_query=search_query)
         elif web_results:
             prompt = _build_web_prompt(search_query, web_results)
@@ -753,7 +822,59 @@ def get_rag_response_stream(query_english: str, original_query: str, chat_histor
             prompt = _build_fallback_prompt(search_query)
 
     messages_payload = [{"role": "user", "content": prompt}]
-    max_t = 280 if is_voice_mode else None
+    max_t = 650 if is_voice_mode else 1200
 
     for chunk in _call_groq_stream_with_fallback(messages_payload, max_tokens=max_t, prefer_fast=is_voice_mode):
         yield chunk
+
+
+def get_fast_scheme_facts(query: str, state: str = "") -> str:
+    """
+    Ultra-low latency scheme facts retrieval (< 50ms) for Gemini Live Tool Call.
+    Queries local database & FAISS index directly for accurate facts.
+    """
+    if not query:
+        return "No scheme facts found."
+
+    clean_q = query.strip()
+
+    # Step 1: Direct SQL Keyword Search (highest accuracy for named schemes like PM Kisan, Ayushman Bharat, etc.)
+    try:
+        from .models import GovernmentScheme
+        from django.db.models import Q
+        
+        words = [w for w in clean_q.split() if len(w) > 2]
+        title_q = Q()
+        for w in words:
+            title_q |= Q(title__icontains=w)
+        
+        schemes = list(GovernmentScheme.objects.filter(title_q)[:2])
+        if schemes:
+            facts_list = []
+            for s in schemes:
+                facts_list.append(f"Scheme Name: {s.title}\nDescription: {s.description}\nKey Details: {s.details[:500]}")
+            print(f"[FastFacts] Exact SQL match for '{query}' -> {[s.title for s in schemes]}")
+            return "\n\n".join(facts_list)
+    except Exception as err:
+        print(f"[FastFacts] SQL search error: {err}")
+
+    # Step 2: Vector Search fallback
+    try:
+        from .embeddings import search_similar_schemes
+        results = search_similar_schemes(clean_q, top_k=2)
+        if results and len(results) > 0:
+            facts_list = []
+            for item in results:
+                s = item.get("scheme", {})
+                title = s.get("title", "")
+                desc = s.get("description", "")
+                details = s.get("details", "")[:400]
+                facts_list.append(f"Scheme Name: {title}\nDescription: {desc}\nKey Details: {details}")
+            print(f"[FastFacts] Vector match for '{query}' -> {[s.get('scheme', {}).get('title') for s in results]}")
+            return "\n\n".join(facts_list)
+    except Exception as err:
+        print(f"[FastFacts] Vector search error: {err}")
+
+    return f"Indian Government Scheme query: {clean_q}"
+
+

@@ -22,15 +22,22 @@ from langdetect import detect, LangDetectException
 from deep_translator import GoogleTranslator
 
 
-# Mapping of language codes to full names (for logging)
+# Mapping of language codes to full names (for logging & prompt construction)
 LANGUAGE_NAMES = {
     "en": "English",
     "hi": "Hindi",
     "kn": "Kannada",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "mr": "Marathi",
+    "bn": "Bengali",
+    "gu": "Gujarati",
+    "ml": "Malayalam",
+    "pa": "Punjabi"
 }
 
-# Supported language codes
-SUPPORTED_LANGUAGES = {"en", "hi", "kn"}
+# Supported language codes across JanSeva AI
+SUPPORTED_LANGUAGES = {"en", "hi", "kn", "ta", "te", "mr", "bn", "gu", "ml", "pa"}
 
 
 def detect_language(text: str) -> str:

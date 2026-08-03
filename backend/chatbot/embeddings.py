@@ -231,7 +231,9 @@ def seed_db():
             title=item["title"],
             defaults={
                 "description": item["description"],
-                "details": details_str
+                "details": details_str,
+                "application_deadline": item.get("application_deadline", "Ongoing / Open"),
+                "is_active": True,
             }
         )
     print("[Embeddings] Seeding complete.")
@@ -259,13 +261,15 @@ def build_faiss_index(force_rebuild=False):
         {
             "title": s.title,
             "description": s.description,
-            "details": s.details
+            "details": s.details,
+            "application_deadline": getattr(s, "application_deadline", "Ongoing / Open"),
+            "is_active": getattr(s, "is_active", True)
         } for s in db_schemes
     ]
 
-    # Embed a combination of title, description, and the first chunk of details 
-    # to ensure words inside the PDF are caught by the FAISS vector search.
-    _descriptions = [f"{s['title']} {s['description']} {s['details'][:1000]}" for s in _schemes]
+    # Embed a combination of title, description, deadline, and the first chunk of details 
+    # to ensure words inside the PDF and deadlines are caught by the FAISS vector search.
+    _descriptions = [f"{s['title']} {s['description']} Application Deadline: {s['application_deadline']} {s['details'][:1000]}" for s in _schemes]
 
     print(f"[Embeddings] Building NumPy vector index for {len(_descriptions)} schemes...")
 

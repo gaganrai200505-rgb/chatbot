@@ -20,6 +20,69 @@ const getApiBaseUrl = () => {
 
 const API_BASE_URL = getApiBaseUrl();
 
+/**
+ * Decode a JWT payload (without verification) to read the `exp` claim.
+ * Returns null for malformed tokens.
+ */
+const decodeJwtExp = (token) => {
+  try {
+    const payload = token.split('.')[1];
+    const padded = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const json = decodeURIComponent(
+      atob(padded).split('').map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join('')
+    );
+    const data = JSON.parse(json);
+    return data?.exp ? data.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Returns a valid access token, transparently refreshing via the refresh
+ * token when the current access token is missing or expired.
+ * This is used by raw `fetch` calls (SSE stream, TTS blob, STT multipart)
+ * which cannot go through the Axios response-interceptor refresh path.
+ * Returns null when no token is available (user not logged in).
+ */
+const getValidAccessToken = async () => {
+  const accessToken = localStorage.getItem('access_token');
+  const refreshToken = localStorage.getItem('refresh_token');
+
+  // No token at all — not logged in
+  if (!accessToken) {
+    if (refreshToken) {
+      // Access token missing but refresh exists — try to refresh
+      try {
+        const res = await axios.post(`${API_BASE_URL}/token/refresh/`, { refresh: refreshToken });
+        const newAccess = res.data.access;
+        localStorage.setItem('access_token', newAccess);
+        return newAccess;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  // Check expiry (add 10s safety margin)
+  const expMs = decodeJwtExp(accessToken);
+  if (expMs && expMs - 10000 > Date.now()) {
+    return accessToken; // still valid
+  }
+
+  // Expired (or undecodable) — attempt refresh
+  if (!refreshToken) return null;
+  try {
+    const res = await axios.post(`${API_BASE_URL}/token/refresh/`, { refresh: refreshToken });
+    const newAccess = res.data.access;
+    localStorage.setItem('access_token', newAccess);
+    return newAccess;
+  } catch {
+    return null;
+  }
+};
+
 // Create an Axios instance with JWT interceptor
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -140,9 +203,23 @@ export const sendChatMessage = async (query, language = '', sessionId = '', sele
   }
 };
 
-/** Send a streaming chat message for instant real-time token reception */
-export const sendChatMessageStream = async (query, language = '', sessionId = '', selectedState = '', isVoice = false, onChunk, onComplete) => {
-  const token = localStorage.getItem('access_token');
+/**
+ * Send a streaming chat message for instant real-time token reception.
+ * Accepts an optional AbortSignal so callers can cancel the in-flight SSE
+ * stream (e.g. when the user barges in / interrupts the AI while it is
+ * still generating tokens).
+ */
+export const sendChatMessageStream = async (
+  query,
+  language = '',
+  sessionId = '',
+  selectedState = '',
+  isVoice = false,
+  onChunk,
+  onComplete,
+  signal = null
+) => {
+  const token = await getValidAccessToken();
   const response = await fetch(`${API_BASE_URL}/chat/`, {
     method: 'POST',
     headers: {
@@ -156,7 +233,8 @@ export const sendChatMessageStream = async (query, language = '', sessionId = ''
       state: selectedState,
       is_voice: isVoice,
       stream: true
-    })
+    }),
+    signal
   });
 
   if (!response.ok) {
@@ -169,12 +247,14 @@ export const sendChatMessageStream = async (query, language = '', sessionId = ''
   let activeSessionId = sessionId;
   let detectedLang = language;
 
+  let buffer = '';
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
 
-    const chunkStr = decoder.decode(value, { stream: true });
-    const lines = chunkStr.split('\n');
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || ''; // Keep incomplete line fragment in buffer
 
     for (const line of lines) {
       if (line.startsWith('data: [DONE]')) {
@@ -192,11 +272,13 @@ export const sendChatMessageStream = async (query, language = '', sessionId = ''
             fullText += parsed.token;
             if (onChunk) onChunk(parsed.token, fullText, activeSessionId);
           }
-        } catch (e) {}
+        } catch (e) { }
       }
     }
   }
 
+  // Stream ended without [DONE] — only fire onComplete if not aborted
+  // (an aborted reader throws, so reaching here means a clean end).
   if (onComplete) onComplete(fullText, activeSessionId, detectedLang);
   return { response: fullText, session_id: activeSessionId, detected_lang: detectedLang };
 };
@@ -245,35 +327,146 @@ export const checkEligibility = async (profileData) => {
   }
 };
 
-/** Synthesize speech using backend neural TTS (edge-tts / gTTS) */
-export const fetchTextToSpeechAudio = async (text, language = 'en', timeoutMs = 10000) => {
-  try {
+/** Synthesize speech using backend neural TTS (edge-tts / sarvam / gTTS) */
+export const fetchTextToSpeechAudio = async (text, language = 'en', timeoutMs = 10000, voiceOpts = {}) => {
+  // Inner single-attempt function
+  const attempt = async (ms) => {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const timeoutId = setTimeout(() => controller.abort(), ms);
+    try {
+      const token = await getValidAccessToken();
+      const payload = {
+        text,
+        language,
+        gender: voiceOpts.gender || voiceOpts.voice_id || '',
+        voice_id: voiceOpts.voice_id || voiceOpts.gender || '',
+        provider: voiceOpts.provider || 'edge',
+        rate: voiceOpts.rate || '+0%'
+      };
+      const res = await fetch(`${API_BASE_URL}/tts/`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      if (!res.ok) {
+        console.warn('[TTS Fetch] Server returned status:', res.status);
+        return null;
+      }
+      const blob = await res.blob();
+      if (blob.size < 100) return null;
+      const url = URL.createObjectURL(blob);
+      console.log('[TTS Fetch] Success created blob URL:', url, 'size:', blob.size);
+      return url;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      console.warn('[TTS Fetch] Attempt failed:', error.message);
+      return null;
+    }
+  };
 
-    const res = await fetch(`${API_BASE_URL}/tts/`, {
+  // First attempt with caller-specified timeout
+  let url = await attempt(timeoutMs);
+
+  // Retry once with a generous 20s timeout (handles Render cold-start + slow mobile networks)
+  if (!url) {
+    console.warn('[TTS Fetch] First attempt failed — retrying with 20s timeout (cold-start recovery)...');
+    url = await attempt(20000);
+  }
+
+  if (!url) console.warn('[TTS Fetch] Both attempts failed — will fall back to WebSpeech');
+  return url;
+};
+
+/** Send recorded audio blob to Groq Whisper Large V3 for accurate transcription.
+ *  Returns transcript string or '' on failure — caller handles fallback to WebSpeech.
+ *  Supports all 10 regional Indian languages.
+ */
+export const sendAudioToGroqSTT = async (audioBlob, lang, externalSignal = null) => {
+  try {
+    let ext = 'webm';
+    if (audioBlob && audioBlob.type) {
+      if (audioBlob.type.includes('mp4') || audioBlob.type.includes('aac') || audioBlob.type.includes('m4a')) ext = 'm4a';
+      else if (audioBlob.type.includes('wav')) ext = 'wav';
+      else if (audioBlob.type.includes('ogg')) ext = 'ogg';
+      else if (audioBlob.type.includes('mp3')) ext = 'mp3';
+    }
+    const formData = new FormData();
+    formData.append('audio', audioBlob, `recording.${ext}`);
+    formData.append('lang', lang);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s max
+
+    if (externalSignal) {
+      externalSignal.addEventListener('abort', () => controller.abort());
+    }
+
+    const token = await getValidAccessToken();
+    const res = await fetch(`${API_BASE_URL}/stt/groq/`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, language }),
-      signal: controller.signal
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
+      signal: controller.signal,
     });
 
     clearTimeout(timeoutId);
 
     if (!res.ok) {
-      console.warn('[TTS Fetch] Server returned status:', res.status);
-      return null;
+      console.warn('[Groq STT] HTTP error:', res.status);
+      return '';
     }
-    const blob = await res.blob();
-    if (blob.size < 100) return null;
-    const url = URL.createObjectURL(blob);
-    console.log('[TTS Fetch] Success created blob URL:', url, 'size:', blob.size);
-    return url;
-  } catch (error) {
-    console.warn("[TTS Fetch] Error:", error.message);
+
+    const data = await res.json();
+    console.log(`[Groq STT] source=${data.source} text="${(data.text || '').slice(0, 60)}"`);
+    return data.text || '';
+  } catch (err) {
+    console.warn('[Groq STT] Request failed:', err.message);
+    return '';
+  }
+};
+
+/** Fetch Gemini 2.0 Multimodal Live Voice-to-Voice config */
+export const fetchGeminiLiveConfig = async () => {
+  try {
+    const token = await getValidAccessToken();
+    const res = await fetch(`${API_BASE_URL}/voice/live-config/`, {
+      headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.warn('[Gemini Live] Config fetch failed:', err.message);
     return null;
   }
 };
+
+/** Tool Search Execution for Gemini 2.0 Live session to query DB facts */
+export const executeToolSearch = async (query, state = '') => {
+  try {
+    const token = await getValidAccessToken();
+    const res = await fetch(`${API_BASE_URL}/voice/tool-search/`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+      },
+      body: JSON.stringify({ query, state })
+    });
+    if (!res.ok) return '';
+    const data = await res.json();
+    return data.facts || '';
+  } catch (err) {
+    console.warn('[Tool Search] Execution failed:', err.message);
+    return '';
+  }
+};
+
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Keep-Alive: prevent Render free-tier server from sleeping.

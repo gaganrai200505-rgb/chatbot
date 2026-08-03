@@ -22,6 +22,9 @@ class GovernmentScheme(models.Model):
     title = models.CharField(max_length=255, unique=True)
     description = models.TextField(help_text="Provide a detailed paragraph. This is embedded into FAISS for vector matching.")
     details = models.TextField(help_text="Provide extra info, eligibility, benefits, and how to apply. You can use markdown or plain text.", blank=True)
+    application_deadline = models.CharField(max_length=255, default='Ongoing / Open', help_text="e.g. 31 August 2026, 31 October 2026, or Ongoing", blank=True)
+    is_active = models.BooleanField(default=True, help_text="Is the application portal currently open/active?")
+    last_updated_date = models.DateField(auto_now=True)
     pdf_document = models.FileField(upload_to='schemes/pdfs/', blank=True, null=True, help_text="Upload a PDF. Its text will be automatically extracted into the details box upon saving.")
     
     created_at = models.DateTimeField(auto_now_add=True)
@@ -93,3 +96,4 @@ class OTPCode(models.Model):
 
     def __str__(self):
         return f"{self.user.username} — {self.purpose} OTP ({self.code})"
+

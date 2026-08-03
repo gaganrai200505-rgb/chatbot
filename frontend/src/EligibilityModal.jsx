@@ -55,6 +55,8 @@ const EligibilityModal = ({ isOpen, onClose }) => {
     }));
   };
 
+
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
@@ -99,6 +101,7 @@ const EligibilityModal = ({ isOpen, onClose }) => {
         </div>
 
         {/* Wizard Form Content */}
+
         {step <= 4 && (
           <form onSubmit={handleSubmit} className="wizard-form">
             {/* Step Indicators */}

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { sendChatMessage, sendChatMessageStream, fetchTextToSpeechAudio } from './api';
+import { sendChatMessage, sendChatMessageStream, fetchTextToSpeechAudio, sendAudioToGroqSTT } from './api';
+import { GeminiLiveSession } from './geminiLiveWebSocket';
 
 /* ─────────────────────────────────────────────────────────────────────────
  * Constants & Helpers
@@ -31,6 +32,30 @@ const VOICE_LANGUAGES = [
   { code: 'ml',   name: 'മലയാളം (Malayalam)',   flag: '🇮🇳' },
   { code: 'pa',   name: 'ਪੰਜਾਬੀ (Punjabi)',       flag: '🇮🇳' },
 ];
+
+const REGIONAL_GREETINGS = {
+  en: "Hey! I'm listening — ask me about any government scheme.",
+  hi: "नमस्ते! मैं आपकी बात सुन रहा हूँ — किसी भी सरकारी योजना के बारे में पूछें।",
+  kn: "ನಮಸ್ಕಾರ! — ಯಾವುದೇ ಸರ್ಕಾರಿ ಯೋಜನೆಯ ಬಗ್ಗೆ ನನ್ನನ್ನು ಕೇಳಿ.",
+  ta: "வணக்கம்! நான் கேட்கிறேன் — எந்த அரசு திட்டத்தைப் பற்றியும் என்னிடம் கேளுங்கள்.",
+  te: "నమస్కారం! నేను వింటున్నాను — ఏదైనా ప్రభుత్వ పథకం గురించి నన్ను అడగండి.",
+  mr: "नमस्कार! मी ऐकत आहे — कोणत्याही सरकारी योजनेबद्दल मला विचारा.",
+  bn: "নমস্কার! আমি শুনছি — যেকোনো সরকারি প্রকল্প সম্পর্কে আমাকে জিজ্ঞাসা করুন।",
+  gu: "નમસ્તે! હું સાંભળી રહ્યો છું — મને કોઈપણ સરકારી યોજના વિશે પૂછો.",
+  ml: "നമസ്കാരം! ഞാൻ കേൾക്കുന്നു — ഏത് സർക്കാർ പദ്ധതിയെക്കുറിച്ചും എന്നോട് ചോദിക്കൂ.",
+  pa: "ਸਤਿ ਸ਼੍ਰੀ ਅਕਾਲ! ਮੈਂ ਸੁਣ ਰਿਹਾ ਹਾਂ — ਮੈਨੂੰ ਕਿਸੇ ਵੀ ਸਰਕਾਰੀ ਯੋਜਨਾ ਬਾਰੇ ਪੁੱਛੋ।",
+  auto: "Hey! I'm listening — ask me about any government scheme."
+};
+
+const getGreetingText = (lang, uname) => {
+  const base = REGIONAL_GREETINGS[lang] || REGIONAL_GREETINGS['en'];
+  if (lang === 'en' && uname) {
+    const displayName = uname.split('@')[0].split('.')[0];
+    const nameCap = displayName ? displayName.charAt(0).toUpperCase() + displayName.slice(1) : '';
+    return nameCap ? `Hey ${nameCap}! I'm listening — ask me about any government scheme.` : base;
+  }
+  return base;
+};
 
 const ChevronDownIcon = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -89,9 +114,9 @@ const getRealisticVoice = (langCode) => {
  *   2. Time window: only active for 4 s after AI speech ends
  * Both must be true to suppress, keeping false-positive rate near zero.
  * ───────────────────────────────────────────────────────────────────────── */
-const echoWindowMs   = 4000;            // 4 s post-speech protection window
-let   echoWindowEnd  = 0;              // epoch ms when window expires
-let   lastSpokenText = '';             // normalized text of last AI utterance
+const echoWindowMs   = 4000;            // 4s post-speech protection window (matches VOICE_TRANSFORMATION_STRATEGY.md)
+let   echoWindowEnd  = 0;               // epoch ms when window expires
+let   lastSpokenText = '';              // normalized text of last AI utterance
 
 /** Call this immediately before audio playback starts */
 const setEchoSource = (text) => {
@@ -111,7 +136,8 @@ const tokenize = (str) => new Set(
 
 /**
  * Jaccard similarity between two strings.
- * Returns 0.0 – 1.0; values ≥ 0.55 are treated as an echo.
+ * Returns 0.0 – 1.0; values ≥ 0.55 are treated as an echo (matches strategy
+ * doc §1.1 and the Jaccard comment above, not the stale 0.85 constant).
  */
 const jaccardSimilarity = (a, b) => {
   const setA = tokenize(a);
@@ -131,7 +157,7 @@ const isEcho = (transcript) => {
   if (Date.now() > echoWindowEnd) return false;   // outside protection window
   const sim = jaccardSimilarity(lastSpokenText, transcript);
   if (sim >= 0.55) {
-    console.log(`[EchoGuard] Suppressed (Jaccard=${sim.toFixed(2)}):`, transcript);
+    console.log(`[EchoGuard] Suppressed echo duplicate (Jaccard=${sim.toFixed(2)}):`, transcript);
     return true;
   }
   return false;
@@ -210,6 +236,14 @@ const CloseIcon = () => (
   </svg>
 );
 
+const PlusIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="12" y1="5" x2="12" y2="19"/>
+    <line x1="5" y1="12" x2="19" y2="12"/>
+  </svg>
+);
+
 /* ─────────────────────────────────────────────────────────────────────────
  * ChatGPT Voice Style Minimalist Pulsing Halo Orb Component
  * ───────────────────────────────────────────────────────────────────────── */
@@ -245,10 +279,12 @@ const SiriVoiceModal = ({
   activeSessionId = '',
   onSessionStarted,
   onMessageSent,
-  username = ''
+  username = '',
+  onNewChat
 }) => {
   const [currentLanguage, setCurrentLanguage] = useState(language || 'auto');
   const [isLangMenuOpen, setIsLangMenuOpen]   = useState(false);
+  const [voiceGender, setVoiceGender]         = useState('female');
 
   const [mode, setMode]           = useState('idle');
   const [userText, setUserText]   = useState('');
@@ -297,6 +333,18 @@ const SiriVoiceModal = ({
   const silenceTimerRef   = useRef(null);
   const latestTranscriptRef = useRef('');
   const startListeningRef = useRef(null);
+  // MediaRecorder refs — used by the Groq Whisper STT path
+  const mediaRecorderRef  = useRef(null);
+  const audioChunksRef    = useRef([]);
+  const vadTimerRef       = useRef(null);   // voice-activity-detection silence timer
+  const vadAnalyserRef    = useRef(null);   // AudioContext analyser node
+  const vadStreamRef      = useRef(null);   // mic MediaStream kept alive during recording
+  const bargeInTimerRef   = useRef(null);   // voice barge-in timer
+  const bargeInStreamRef  = useRef(null);   // mic stream active while AI is replying
+  const speakingSafetyTimerRef = useRef(null); // safety timer to unlock listening state
+  const liveSessionRef    = useRef(null);   // Gemini 2.0 Multimodal Live WebSocket session
+  const globalAbortControllerRef = useRef(null); // global AbortController for in-flight requests
+  const [isLiveActive, setIsLiveActive] = useState(false);
 
   useEffect(() => {
     if (language) setCurrentLanguage(language);
@@ -305,15 +353,132 @@ const SiriVoiceModal = ({
   /* ── Stop audio playback completely ── */
   const stopAudio = useCallback(() => {
     isSpeakingRef.current = false;
+    if (liveSessionRef.current) {
+      try { liveSessionRef.current.stopAudioPlayback(); } catch {}
+    }
+    if (globalAbortControllerRef.current) {
+      try { globalAbortControllerRef.current.abort(); } catch {}
+      globalAbortControllerRef.current = null;
+    }
+    if (speakingSafetyTimerRef.current) { clearTimeout(speakingSafetyTimerRef.current); speakingSafetyTimerRef.current = null; }
+    if (bargeInTimerRef.current) { clearTimeout(bargeInTimerRef.current); bargeInTimerRef.current = null; }
+    if (bargeInStreamRef.current) {
+      try { bargeInStreamRef.current.getTracks().forEach(t => t.stop()); } catch {}
+      bargeInStreamRef.current = null;
+    }
     try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch {}
     if (playbackAudioRef.current) {
-      try { playbackAudioRef.current.pause(); } catch {}
+      try {
+        playbackAudioRef.current.pause();
+        playbackAudioRef.current.currentTime = 0;
+        playbackAudioRef.current.src = '';
+      } catch {}
       playbackAudioRef.current.onended = null;
       playbackAudioRef.current.onerror = null;
       playbackAudioRef.current = null;
     }
     currentUtterRef.current = null;
+    // Also stop any active Groq MediaRecorder session
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try { mediaRecorderRef.current.stop(); } catch {}
+      mediaRecorderRef.current = null;
+    }
+    if (vadTimerRef.current) { clearTimeout(vadTimerRef.current); vadTimerRef.current = null; }
   }, []);
+
+  /* ── Get Echo-Cancelled Microphone Stream ── */
+  const getEchoCancelledStream = useCallback(async () => {
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        }
+      });
+    } catch (e) {
+      return await navigator.mediaDevices.getUserMedia({ audio: true });
+    }
+  }, []);
+
+  /* ── Hands-free Voice Barge-In: mic listener active while AI is speaking ── */
+  const startBargeInMicListener = useCallback(() => {
+    if (isMutedRef.current || !navigator.mediaDevices?.getUserMedia) return;
+
+    const startTime = Date.now();
+    const GRACE_PERIOD_MS = 150; // 150ms initial playback grace period
+
+    getEchoCancelledStream()
+      .then(stream => {
+        if (!isSpeakingRef.current) {
+          stream.getTracks().forEach(t => t.stop());
+          return;
+        }
+
+        bargeInStreamRef.current = stream;
+        try {
+          const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          const source   = audioCtx.createMediaStreamSource(stream);
+          const analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 512;
+          source.connect(analyser);
+
+          const dataArray = new Uint8Array(analyser.frequencyBinCount);
+          let userSpeechSpikes = 0;
+
+          const checkBargeIn = () => {
+            if (!isSpeakingRef.current) {
+              stream.getTracks().forEach(t => t.stop());
+              try { audioCtx.close(); } catch {}
+              return;
+            }
+
+            if (Date.now() - startTime < GRACE_PERIOD_MS) {
+              bargeInTimerRef.current = setTimeout(checkBargeIn, 50);
+              return;
+            }
+
+            analyser.getByteFrequencyData(dataArray);
+            let maxVal = 0;
+            let sum = 0;
+            let sqSum = 0;
+            for (let i = 0; i < dataArray.length; i++) {
+              const v = dataArray[i];
+              if (v > maxVal) maxVal = v;
+              sum += v;
+              sqSum += v * v;
+            }
+            const avg = sum / dataArray.length;
+            const rms = Math.sqrt(sqSum / dataArray.length);
+
+            // User Vocal Power Threshold: Ignore speaker output bleed (< 60 peak), trigger ONLY on genuine user speech (> 75 peak)
+            if (maxVal >= 75 || rms >= 28) {
+              userSpeechSpikes++;
+              if (userSpeechSpikes >= 2) {
+                console.log(`[VoiceBargeIn] User voice interrupted AI! rms=${rms.toFixed(1)}, maxVal=${maxVal}`);
+                stopAudio();
+                stream.getTracks().forEach(t => t.stop());
+                try { audioCtx.close(); } catch {}
+                isSpeakingRef.current = false;
+                isProcessingRef.current = false;
+                setMode('listening');
+                if (startListeningRef.current) startListeningRef.current();
+                return;
+              }
+            } else {
+              userSpeechSpikes = 0;
+            }
+
+            bargeInTimerRef.current = setTimeout(checkBargeIn, 40); // 40ms high-frequency polling for instant response
+          };
+
+          checkBargeIn();
+        } catch (e) {
+          console.warn('[BargeIn] AudioContext setup failed:', e.message);
+        }
+      })
+      .catch(() => {});
+  }, [stopAudio, getEchoCancelledStream]);
 
   /* ── Stop speech recognition cleanly ── */
   const stopRecognition = useCallback(() => {
@@ -334,8 +499,23 @@ const SiriVoiceModal = ({
     }
   }, []);
 
+  /* ── Stop MediaRecorder + VAD cleanly (Groq STT path) ── */
+  const stopMediaRecorder = useCallback(() => {
+    if (vadTimerRef.current) { clearTimeout(vadTimerRef.current); vadTimerRef.current = null; }
+    if (vadAnalyserRef.current) { try { vadAnalyserRef.current.disconnect(); } catch {} vadAnalyserRef.current = null; }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try { mediaRecorderRef.current.stop(); } catch {}
+    }
+    mediaRecorderRef.current = null;
+    audioChunksRef.current = [];
+    if (vadStreamRef.current) {
+      try { vadStreamRef.current.getTracks().forEach(t => t.stop()); } catch {}
+      vadStreamRef.current = null;
+    }
+  }, []);
+
   /* ── Speak the full AI answer via Edge-TTS, fallback to WebSpeech ── */
-  const speakAnswer = useCallback(async (text, lang) => {
+  const speakAnswer = useCallback(async (text, lang, isGreeting = false) => {
     if (!text || isMutedRef.current) {
       setMode('idle');
       return;
@@ -353,26 +533,50 @@ const SiriVoiceModal = ({
     isSpeakingRef.current = true;
     setMode('speaking');
     setEchoSource(cleanText);           // prime EchoGuard with what AI will say
-    console.log('[Voice] Speaking answer:', cleanText.slice(0, 60));
+
+    // Only activate barge-in for AI answer turns, NOT during the initial system greeting
+    if (!isGreeting) {
+      startBargeInMicListener();
+    }
+
+    console.log(`[Voice] Speaking answer (isGreeting=${isGreeting}):`, cleanText.slice(0, 60));
+
+    if (speakingSafetyTimerRef.current) clearTimeout(speakingSafetyTimerRef.current);
+    speakingSafetyTimerRef.current = setTimeout(() => {
+      if (isSpeakingRef.current) {
+        console.warn('[Voice] Speech safety timeout — resetting speaking state');
+        isSpeakingRef.current = false;
+        if (!isMutedRef.current) {
+          setMode('listening');
+          if (startListeningRef.current) startListeningRef.current();
+        }
+      }
+    }, 10000);
 
     const onSpeechFinished = () => {
-      console.log('[Voice] Speech finished — restarting listener in 800ms');
+      console.log('[Voice] Speech finished — re-opening mic instantly (0ms delay)');
+      if (speakingSafetyTimerRef.current) { clearTimeout(speakingSafetyTimerRef.current); speakingSafetyTimerRef.current = null; }
       openEchoWindow();                 // open 4 s suppression window NOW
       currentUtterRef.current = null;
       isSpeakingRef.current = false;
-      setTimeout(() => {
-        if (!isMutedRef.current && startListeningRef.current) {
-          startListeningRef.current();
-        } else {
-          setMode('idle');
-        }
-      }, 800);
+      if (!isMutedRef.current) {
+        setMode('listening');
+        if (startListeningRef.current) startListeningRef.current();
+      } else {
+        setMode('idle');
+      }
     };
 
     // --- PRIMARY: Edge-TTS Neural Audio via backend ---
+    // Truncate to 600 chars max for voice — keeps synthesis fast on mobile networks.
+    // The full text is already displayed on-screen; the voice only needs the key content.
+    const voiceText = cleanText.length > 600
+      ? cleanText.slice(0, 597) + '...'
+      : cleanText;
     let ttsAudioUrl = null;
     try {
-      ttsAudioUrl = await fetchTextToSpeechAudio(cleanText, lang, 10000);
+      const ttsTimeout = isGreeting ? 2500 : 10000;
+      ttsAudioUrl = await fetchTextToSpeechAudio(voiceText, lang, ttsTimeout, { gender: voiceGender });
     } catch (e) {
       ttsAudioUrl = null;
     }
@@ -393,7 +597,12 @@ const SiriVoiceModal = ({
       audio.onended = cleanup;
       audio.onerror = (err) => {
         console.warn('[Voice] Audio element error:', err);
-        cleanup();
+        URL.revokeObjectURL(ttsAudioUrl);
+        if (playbackAudioRef.current === audio) playbackAudioRef.current = null;
+        // On decode/playback failure, still open the echo window and release
+        // the speaking state so the mic re-opens instead of being stuck until
+        // the 10s safety timer.
+        onSpeechFinished();
       };
 
       try {
@@ -452,6 +661,11 @@ const SiriVoiceModal = ({
     isProcessingRef.current = true;
     stopAudio();
     stopRecognition();
+    // Create a fresh AbortController for this query so barge-in toggles
+    // (stopAudio) can cancel the in-flight SSE stream instead of allowing
+    // stale tokens to overwrite newer conversation turns.
+    const queryAbortController = new AbortController();
+    globalAbortControllerRef.current = queryAbortController;
     setMode('thinking');
     setUserText(q);
     setAiText('');
@@ -490,10 +704,28 @@ const SiriVoiceModal = ({
               startListeningRef.current();
             }
           }
-        }
+          if (globalAbortControllerRef.current === queryAbortController) {
+            globalAbortControllerRef.current = null;
+          }
+        },
+        queryAbortController.signal
       );
     } catch (err) {
+      // User triggered barge-in / tap-to-interrupt: the stream was intentionally
+      // aborted via the AbortController. Do NOT fall through to the non-streaming
+      // path — that would duplicate the query and overlap with the new user turn.
+      if (err?.name === 'AbortError' || err?.code === 20) {
+        console.log('[Voice] Stream aborted (barge-in/interrupt) — skipping fallback');
+        if (globalAbortControllerRef.current === queryAbortController) {
+          globalAbortControllerRef.current = null;
+        }
+        isProcessingRef.current = false;
+        return;
+      }
       console.warn('[Voice] Stream failed, trying non-stream:', err.message);
+      if (globalAbortControllerRef.current === queryAbortController) {
+        globalAbortControllerRef.current = null;
+      }
       try {
         const res = await sendChatMessage(q, currentLanguageRef.current, activeSessionIdRef.current, selectedStateRef.current, true);
         const reply = res?.response || res?.answer || 'Sorry, I could not get information about that.';
@@ -517,9 +749,179 @@ const SiriVoiceModal = ({
     }
   }, [speakAnswer, stopAudio, stopRecognition, onSessionStarted, onMessageSent]);
 
+  /* ── Languages routed to Groq Whisper ── */
+  const GROQ_STT_LANGS = new Set(['en', 'hi', 'mr', 'kn', 'ta', 'te', 'bn', 'gu', 'ml', 'pa', 'auto']);
+
   /* ── Start speech recognition ── */
   const startListening = useCallback(() => {
-    // Don't start listening while speaking or processing
+    // Don't start Groq listening if speaking, processing, muted, or if Gemini Live is active
+    if (isSpeakingRef.current || isProcessingRef.current || isMutedRef.current || liveSessionRef.current?.isConnected) return;
+
+    const lang = currentLanguageRef.current || 'en';
+
+    /* ─── PATH A: Groq Whisper via MediaRecorder (en / hi / mr / auto) ─── */
+    if (GROQ_STT_LANGS.has(lang)) {
+      stopRecognition();
+      stopMediaRecorder();
+      audioChunksRef.current = [];
+
+      getEchoCancelledStream()
+        .then(stream => {
+          if (isSpeakingRef.current || isProcessingRef.current || isMutedRef.current) {
+            stream.getTracks().forEach(t => t.stop());
+            return;
+          }
+
+          vadStreamRef.current = stream;
+          setMode('listening');
+
+          // ── MediaRecorder: collect audio in 250 ms slices ──
+          const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+            ? 'audio/webm;codecs=opus'
+            : MediaRecorder.isTypeSupported('audio/webm')
+            ? 'audio/webm'
+            : MediaRecorder.isTypeSupported('audio/mp4')
+            ? 'audio/mp4'
+            : MediaRecorder.isTypeSupported('audio/aac')
+            ? 'audio/aac'
+            : '';
+          const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+          mediaRecorderRef.current = recorder;
+
+          recorder.ondataavailable = e => {
+            if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data);
+          };
+
+          recorder.onstop = async () => {
+            const chunks = audioChunksRef.current.slice();
+            audioChunksRef.current = [];
+            if (isSpeakingRef.current || isProcessingRef.current) return;
+            if (chunks.length === 0) return;
+
+            const blob = new Blob(chunks, { type: mimeType });
+            if (blob.size < 500) return; // too short — ignore
+
+            setInterimText('🎙️ Processing...');
+
+            // Send to Groq Whisper
+            const transcript = await sendAudioToGroqSTT(blob, lang);
+
+            if (transcript && transcript.trim()) {
+              // EchoGuard check
+              if (isEcho(transcript.trim())) {
+                setInterimText('');
+                if (!isMutedRef.current && startListeningRef.current) startListeningRef.current();
+                return;
+              }
+              setInterimText('');
+              handleQuery(transcript.trim());
+            } else {
+              // Groq returned empty → fall back to Web Speech API for 1 attempt
+              console.warn('[Groq STT] Empty transcript — falling back to WebSpeech');
+              setInterimText('');
+              startWebSpeechFallback();
+            }
+          };
+
+          recorder.start(250); // 250 ms slices for responsive VAD
+
+          // ── VAD: silence detection via AudioContext analyser ──
+          try {
+            const audioCtx  = new (window.AudioContext || window.webkitAudioContext)();
+            const source    = audioCtx.createMediaStreamSource(stream);
+            const analyser  = audioCtx.createAnalyser();
+            analyser.fftSize = 512;
+            source.connect(analyser);
+            vadAnalyserRef.current = analyser;
+
+            const dataArray   = new Uint8Array(analyser.frequencyBinCount);
+            const SILENCE_MS  = 1200; // 1.2s quiet after speaking to submit
+            let   speechDetected = false;
+            let   silenceStart   = null;
+            let   ambientSum     = 0;
+            let   ambientCount   = 0;
+            let   ambientFloor   = 2.0;
+            const sampleStartTime = Date.now();
+
+            const checkVAD = () => {
+              if (!mediaRecorderRef.current || mediaRecorderRef.current.state === 'inactive') return;
+              if (isSpeakingRef.current || isProcessingRef.current) return;
+
+              analyser.getByteFrequencyData(dataArray);
+              let maxVal = 0;
+              let sum = 0;
+              for (let i = 0; i < dataArray.length; i++) {
+                if (dataArray[i] > maxVal) maxVal = dataArray[i];
+                sum += dataArray[i];
+              }
+              const avg = sum / dataArray.length;
+
+              // Sample ambient noise floor during first 200ms
+              if (Date.now() - sampleStartTime < 200) {
+                ambientSum += avg;
+                ambientCount++;
+                ambientFloor = Math.max(2.0, ambientSum / (ambientCount || 1));
+                vadTimerRef.current = setTimeout(checkVAD, 40);
+                return;
+              }
+
+              const dynamicSpeechThreshold = Math.max(7, ambientFloor * 2.2);
+
+              // Dynamic Adaptive VAD (calibrated to current room noise floor)
+              if (maxVal >= dynamicSpeechThreshold || avg >= ambientFloor * 1.5) {
+                speechDetected = true;
+                silenceStart   = null; // User actively speaking!
+              } else if (speechDetected) {
+                // User spoke and has now stopped
+                if (!silenceStart) silenceStart = Date.now();
+                if (Date.now() - silenceStart >= SILENCE_MS) {
+                  // Speech segment completed — stop recording & send audio
+                  if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+                    console.log(`[VAD] Speech segment complete (ambientFloor=${ambientFloor.toFixed(1)}) — auto-submitting`);
+                    mediaRecorderRef.current.stop();
+                    vadStreamRef.current?.getTracks().forEach(t => t.stop());
+                  }
+                  return; // stop polling
+                }
+              }
+
+              vadTimerRef.current = setTimeout(checkVAD, 70);
+            };
+
+            checkVAD();
+          } catch (vadErr) {
+            console.warn('[VAD] AudioContext error:', vadErr.message);
+          }
+
+          // Safety: hard 12-second max recording cutoff for longer queries
+          setTimeout(() => {
+            if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+              console.log('[VAD] 12s max recording limit reached — submitting audio');
+              mediaRecorderRef.current.stop();
+              vadStreamRef.current?.getTracks().forEach(t => t.stop());
+            }
+          }, 12000);
+        })
+        .catch(err => {
+          console.warn('[Groq STT] Mic access denied:', err.message);
+          setPermError('Microphone permission required. Tap 🔒 in browser bar to allow.');
+        });
+
+      // Register restart ref so speakAnswer can re-open the mic after TTS
+      startListeningRef.current = () => {
+        if (isSpeakingRef.current || isProcessingRef.current || isMutedRef.current) return;
+        startListening();
+      };
+      return; // Groq path handled
+    }
+
+    /* ─── PATH B: Web Speech API (kn / ta / te / bn / gu / pa — Phase 2 pending) ─── */
+    startWebSpeechFallback();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [handleQuery, stopRecognition, stopMediaRecorder]);
+
+  /* ── Web Speech API recognition — fallback + non-Groq languages ── */
+  const startWebSpeechFallback = useCallback(() => {
     if (isSpeakingRef.current || isProcessingRef.current || isMutedRef.current) return;
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -540,13 +942,18 @@ const SiriVoiceModal = ({
     latestTranscriptRef.current = '';
 
     recognition.onstart = () => {
-      console.log('[Voice] Microphone started — listening');
+      console.log('[Voice] WebSpeech fallback started — listening');
       setMode('listening');
     };
 
     recognition.onresult = (e) => {
-      // Block input if AI is speaking or processing
-      if (isSpeakingRef.current || isProcessingRef.current) return;
+      if (isSpeakingRef.current) {
+        console.log('[WebSpeech] Voice barge-in triggered! Stopping AI audio playback.');
+        stopAudio();
+        isSpeakingRef.current = false;
+        setMode('listening');
+      }
+      if (isProcessingRef.current) return;
 
       let finalT  = '';
       let interimT = '';
@@ -560,37 +967,21 @@ const SiriVoiceModal = ({
         latestTranscriptRef.current = fullText;
         setInterimText(fullText);
 
-        // Auto-submit after 800ms of silence
         if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
         silenceTimerRef.current = setTimeout(() => {
           const pending = latestTranscriptRef.current.trim();
           if (!pending || isProcessingRef.current || isSpeakingRef.current) return;
-
-          // EchoGuard — Jaccard similarity + time-window
-          if (isEcho(pending)) {
-            latestTranscriptRef.current = '';
-            setInterimText('');
-            return;
-          }
-
+          if (isEcho(pending)) { latestTranscriptRef.current = ''; setInterimText(''); return; }
           latestTranscriptRef.current = '';
           setInterimText('');
           stopRecognition();
           handleQuery(pending);
-        }, 800);
+        }, 1200); // increased from 800ms → more complete sentences
       }
 
-      // Also submit immediately on final result
       if (finalT.trim()) {
         const transcript = finalT.trim();
-
-        // EchoGuard — Jaccard similarity + time-window
-        if (isEcho(transcript)) {
-          latestTranscriptRef.current = '';
-          setInterimText('');
-          return;
-        }
-
+        if (isEcho(transcript)) { latestTranscriptRef.current = ''; setInterimText(''); return; }
         latestTranscriptRef.current = '';
         setInterimText('');
         stopRecognition();
@@ -602,45 +993,29 @@ const SiriVoiceModal = ({
       const remaining = latestTranscriptRef.current.trim();
       setInterimText('');
       latestTranscriptRef.current = '';
-
       if (remaining && !isProcessingRef.current && !isSpeakingRef.current) {
-        if (isEcho(remaining)) {
-          // suppressed — do nothing
-        } else {
-          handleQuery(remaining);
-          return;
-        }
+        if (!isEcho(remaining)) { handleQuery(remaining); return; }
       }
-
-      if (!isProcessingRef.current && !isMutedRef.current && !isSpeakingRef.current) {
-        setMode('idle');
-      }
+      if (!isProcessingRef.current && !isMutedRef.current && !isSpeakingRef.current) setMode('idle');
     };
 
     recognition.onerror = (e) => {
       setInterimText('');
       if (e.error !== 'no-speech' && e.error !== 'aborted') {
-        console.warn('[Voice] Recognition error:', e.error);
+        console.warn('[Voice] WebSpeech error:', e.error);
       }
-      if (!isSpeakingRef.current && !isProcessingRef.current) {
-        setMode('idle');
-      }
+      if (!isSpeakingRef.current && !isProcessingRef.current) setMode('idle');
     };
 
     recognitionRef.current = recognition;
-
-    // startListeningRef is used by speakAnswer's onSpeechFinished to restart mic
     startListeningRef.current = () => {
       if (isSpeakingRef.current || isProcessingRef.current || isMutedRef.current) return;
-      // Create a fresh recognition instance each time to avoid Chrome's one-shot limit
       startListening();
     };
 
-    try {
-      recognition.start();
-    } catch (err) {
-      console.warn('[Voice] Could not start recognition:', err.message);
-    }
+    try { recognition.start(); }
+    catch (err) { console.warn('[Voice] Could not start WebSpeech:', err.message); }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [handleQuery, stopRecognition]);
 
   /* ── Unlock browser audio context on first user gesture ── */
@@ -671,40 +1046,82 @@ const SiriVoiceModal = ({
     setIsMuted(false);
     setMode('idle');
     setUserText('');
+    setInterimText('');
     setPermError(null);
     latestTranscriptRef.current = '';
     setEchoSource('');
 
-    const displayName = username ? username.split('@')[0].split('.')[0] : '';
-    const nameCap = displayName ? displayName.charAt(0).toUpperCase() + displayName.slice(1) : '';
-    const greetingText = nameCap
-      ? `Hey ${nameCap}! I'm listening — ask me about any government scheme.`
-      : "Hey! I'm listening — ask me about any government scheme.";
+    // Pre-warm the backend so the first TTS call never hits a cold Render server.
+    // Fire-and-forget — no await, no error handling needed.
+    try {
+      fetch(`${import.meta.env.VITE_API_BASE_URL || (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' ? 'http://127.0.0.1:8000/api' : 'https://chatbot-324d.onrender.com/api')}/ping/`, {
+        method: 'GET', cache: 'no-store'
+      }).catch(() => {});
+    } catch {}
 
+    const greetingText = getGreetingText(currentLanguage, username);
     setAiText(greetingText);
+    if (!activeSessionId) setHistoryLogs([]);
 
-    if (!activeSessionId) {
-      setHistoryLogs([]);
-      // Speak the initial greeting automatically
-      setTimeout(() => {
-        if (!isMutedRef.current) {
-          speakAnswer(greetingText, currentLanguage);
-        }
-      }, 400); // Wait for modal animation to mount
-    } else {
-      const tryStart = () => startListening();
-
-      if (navigator.mediaDevices?.getUserMedia) {
-        navigator.mediaDevices.getUserMedia({ audio: true })
-          .then(stream => { stream.getTracks().forEach(t => t.stop()); tryStart(); })
-          .catch(() => setPermError('Microphone permission required. Tap 🔒 in browser bar to allow.'));
-      } else {
-        tryStart();
+    // Initialize Gemini 2.5 Multimodal Live Session
+    const session = new GeminiLiveSession({
+      voiceGender: voiceGender,
+      currentLanguage: currentLanguage,
+      onSpeechStart: () => {
+        isSpeakingRef.current = true;
+        setInterimText('');
+        setMode('speaking');
+      },
+      onSpeechEnd: () => {
+        isSpeakingRef.current = false;
+        if (!isMutedRef.current) setMode('listening');
+      },
+      onTextChunk: (text) => {
+        setInterimText('');
+        // Clean out any internal meta-thought markers if present
+        const cleanChunk = (text || '').replace(/\*\*[^*]+\*\*/g, '').replace(/Initiating Search[^\n.]*/gi, '');
+        if (cleanChunk) setAiText(prev => prev + cleanChunk);
+      },
+      onToolCall: () => {
+        // Do NOT display internal background process logs in UI
+      },
+      onError: (err) => {
+        console.warn('[GeminiLive] Error event:', err);
+      },
+      onClose: () => setIsLiveActive(false),
+      onMicError: (msg) => {
+        console.warn('[GeminiLive] Mic error:', msg);
+        setPermError('Microphone permission required. Tap 🔒 in browser bar to allow.');
+        setIsLiveActive(false);
       }
-    }
+    });
+
+    setMode('thinking');
+
+    // Connect directly to Gemini 2.5 Multimodal Live API via WebSocket
+    session.connect().then(connected => {
+      if (connected && isOpen) {
+        console.log('[GeminiLive] Native Voice-to-Voice active ✓');
+        liveSessionRef.current = session;
+        setIsLiveActive(true);
+        setMode('listening');
+        session.startMicStreaming();
+      } else {
+        console.warn('[GeminiLive] Native Voice-to-Voice connection failed');
+        liveSessionRef.current = null;
+        setIsLiveActive(false);
+        setPermError('Failed to connect to Gemini 2.5 Live Voice Service. Check your GEMINI_API_KEY.');
+        setMode('idle');
+      }
+    });
 
     return () => {
+      if (liveSessionRef.current) {
+        liveSessionRef.current.disconnect();
+        liveSessionRef.current = null;
+      }
       stopRecognition();
+      stopMediaRecorder();
       stopAudio();
     };
   }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -718,15 +1135,18 @@ const SiriVoiceModal = ({
 
   /* ── Handlers ── */
   const handleSelectLang = (code) => {
-    unlockAudioContext();
     setCurrentLanguage(code);
+    currentLanguageRef.current = code;
     setIsLangMenuOpen(false);
     if (onLanguageChange) onLanguageChange(code);
     stopAudio();
     stopRecognition();
-    setTimeout(() => {
-      if (!isMutedRef.current) startListening();
-    }, 200);
+    const newGreeting = getGreetingText(code, username);
+    setAiText(newGreeting);
+    if (liveSessionRef.current) {
+      // Re-send setup with new language to Gemini Live session
+      try { liveSessionRef.current.sendSetup(liveSessionRef.current.config?.model || 'gemini-2.5-flash-native-audio-latest'); } catch {}
+    }
   };
 
   const handleTypedSubmit = (e) => {
@@ -735,25 +1155,58 @@ const SiriVoiceModal = ({
     const q = inputText.trim();
     if (!q) return;
     setInputText('');
-    handleQuery(q);
+    if (liveSessionRef.current && liveSessionRef.current.isConnected) {
+      // Direct text input over Gemini Live WebSocket realtimeInput
+      setUserText(q);
+      setMode('thinking');
+      setAiText('');
+      try {
+        liveSessionRef.current.ws.send(JSON.stringify({
+          realtimeInput: { text: q }
+        }));
+      } catch {}
+    } else {
+      handleQuery(q);
+    }
+  };
+
+  const handleCardClick = (suggestion) => {
+    unlockAudioContext();
+    const q = (suggestion || '').trim();
+    if (!q) return;
+
+    if (liveSessionRef.current && liveSessionRef.current.isConnected) {
+      // Direct input over Gemini Live WebSocket realtimeInput
+      setUserText(q);
+      setMode('thinking');
+      setAiText('');
+      try {
+        liveSessionRef.current.ws.send(JSON.stringify({
+          realtimeInput: { text: q }
+        }));
+      } catch (err) {
+        console.warn('[GeminiLive] Failed to send card query:', err);
+      }
+    } else {
+      handleQuery(q);
+    }
   };
 
   const handleOrbClick = () => {
     unlockAudioContext();
     if (isSpeakingRef.current) {
-      // Tap orb to interrupt speech
+      // Tap orb to barge in / interrupt speech instantly
       stopAudio();
-      setMode('idle');
-      setTimeout(() => {
-        if (!isMutedRef.current) startListening();
-      }, 300);
+      isSpeakingRef.current = false;
+      isProcessingRef.current = false;
+      setMode('listening');
     } else {
       isProcessingRef.current = false;
       if (isMutedRef.current) {
         isMutedRef.current = false;
         setIsMuted(false);
       }
-      startListening();
+      setMode('listening');
     }
   };
 
@@ -762,7 +1215,7 @@ const SiriVoiceModal = ({
       setIsMuted(false);
       isMutedRef.current = false;
       stopAudio();
-      startListening();
+      setMode('listening');
     } else {
       setIsMuted(true);
       isMutedRef.current = true;
@@ -771,6 +1224,32 @@ const SiriVoiceModal = ({
       setMode('idle');
     }
   };
+
+  const handleEndCall = useCallback(() => {
+    console.log('[Voice] End Call clicked — stopping all audio playback immediately');
+    if (liveSessionRef.current) {
+      liveSessionRef.current.disconnect();
+      liveSessionRef.current = null;
+    }
+    setIsLiveActive(false);
+    isMutedRef.current = true;
+    isSpeakingRef.current = false;
+    isProcessingRef.current = false;
+    if (speakingSafetyTimerRef.current) { clearTimeout(speakingSafetyTimerRef.current); speakingSafetyTimerRef.current = null; }
+    stopAudio();
+    stopRecognition();
+    stopMediaRecorder();
+    if (playbackAudioRef.current) {
+      try {
+        playbackAudioRef.current.pause();
+        playbackAudioRef.current.currentTime = 0;
+        playbackAudioRef.current.src = '';
+      } catch {}
+      playbackAudioRef.current = null;
+    }
+    try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch {}
+    onClose();
+  }, [stopAudio, stopRecognition, stopMediaRecorder, onClose]);
 
   if (!isOpen) return null;
 
@@ -784,8 +1263,21 @@ const SiriVoiceModal = ({
   const selectedLangObj = VOICE_LANGUAGES.find(l => l.code === currentLanguage) || VOICE_LANGUAGES[0];
 
   return (
-    <div className="gemini-live-screen" onClick={() => { setIsLangMenuOpen(false); onClose(); }}>
-      <div className="gemini-live-container" onClick={e => e.stopPropagation()}>
+    <div className="gemini-live-screen" onClick={() => { setIsLangMenuOpen(false); handleEndCall(); }}>
+      <div
+        className="gemini-live-container"
+        onClick={e => {
+          e.stopPropagation();
+          if (isSpeakingRef.current) {
+            console.log('[ScreenBargeIn] User tapped screen while AI speaking — interrupting audio!');
+            stopAudio();
+            isSpeakingRef.current = false;
+            isProcessingRef.current = false;
+            setMode('listening');
+            if (!isMutedRef.current) startListening();
+          }
+        }}
+      >
 
         {/* ── Top Navigation Bar ── */}
         <header className="gemini-live-header">
@@ -831,9 +1323,23 @@ const SiriVoiceModal = ({
             <span className="gemini-live-status-text">{STATUS[mode].label}</span>
           </div>
 
-          <button className="gemini-live-close-btn" onClick={onClose} aria-label="Close JanSeva Live">
-            <CloseIcon />
-          </button>
+          <div className="voice-header-actions">
+            <button 
+              className="gemini-live-home-btn" 
+              onClick={() => {
+                handleEndCall();
+                if (onNewChat) onNewChat();
+              }}
+              title="Return to Home / New Chat"
+              aria-label="Home / New Chat"
+            >
+              <PlusIcon />
+              <span className="live-btn-label">New Chat</span>
+            </button>
+            <button className="gemini-live-close-btn" onClick={onClose} aria-label="Close JanSeva Live" title="Close Voice Mode">
+              <CloseIcon />
+            </button>
+          </div>
         </header>
 
         {/* ── Main Center Stage (ChatGPT Voice Style Pulsing Halo Orb) ── */}
@@ -849,7 +1355,7 @@ const SiriVoiceModal = ({
                 <button
                   key={idx}
                   className="voice-chip-btn"
-                  onClick={() => { unlockAudioContext(); handleQuery(suggestion); }}
+                  onClick={() => handleCardClick(suggestion)}
                 >
                   <span className="chip-icon">⚡</span>
                   <span>{suggestion}</span>
@@ -914,7 +1420,7 @@ const SiriVoiceModal = ({
             {isMuted ? <MicOffIcon /> : <MicIcon />}
             <span>{isMuted ? 'Unmute' : 'Mute'}</span>
           </button>
-          <button className="toolbar-btn end-btn" onClick={onClose} aria-label="End session">
+          <button className="toolbar-btn end-btn" onClick={handleEndCall} aria-label="End session">
             <PhoneOffIcon />
             <span>End Live</span>
           </button>

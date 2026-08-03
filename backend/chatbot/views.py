@@ -10,6 +10,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, generics
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.parsers import MultiPartParser, FormParser
 from django.contrib.auth.models import User
 from django.db import transaction
 
@@ -130,15 +131,13 @@ class ResendOTPView(APIView):
         username = request.data.get('username', '').strip()
         if not username:
             return Response({'error': 'Username is required.'}, status=status.HTTP_400_BAD_REQUEST)
-        try:
-            user = User.objects.get(username=username, is_active=False)
-        except User.DoesNotExist:
-            return Response({'error': 'No pending account found for this username.'}, status=status.HTTP_404_NOT_FOUND)
-        try:
-            send_otp_email(user, OTPCode.PURPOSE_VERIFY)
-        except Exception as e:
-            return Response({'error': f'Failed to send email: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        return Response({'message': 'A new OTP has been sent to your email.'}, status=status.HTTP_200_OK)
+        user = User.objects.filter(username=username, is_active=False).first()
+        if user:
+            try:
+                send_otp_email(user, OTPCode.PURPOSE_VERIFY)
+            except Exception as e:
+                print(f"[ResendOTPView] Error sending OTP: {e}")
+        return Response({'message': 'If a pending account exists, a new OTP has been sent to your email.'}, status=status.HTTP_200_OK)
 
 
 class ForgotPasswordView(APIView):
@@ -156,22 +155,13 @@ class ForgotPasswordView(APIView):
             return Response({'error': 'Email address is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
         user = User.objects.filter(email__iexact=email).first()
-        if not user:
-            return Response(
-                {'error': 'No user found with this email address.'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        try:
-            send_otp_email(user, OTPCode.PURPOSE_RESET)
-        except Exception as e:
-            print(f"[ForgotPasswordView ERROR] send_otp_email failed for {email}: {e}")
-            return Response(
-                {'error': 'Could not send password reset email. Please try again in a moment.'},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE
-            )
+        if user:
+            try:
+                send_otp_email(user, OTPCode.PURPOSE_RESET)
+            except Exception as e:
+                print(f"[ForgotPasswordView ERROR] send_otp_email failed for {email}: {e}")
         return Response(
-            {'message': 'A password reset OTP has been sent to your email. Please check your inbox (and Spam folder).'},
+            {'message': 'If an account exists for this email, a password reset OTP has been sent. Please check your inbox (and Spam folder).'},
             status=status.HTTP_200_OK
         )
 
@@ -407,7 +397,7 @@ class CheckEligibilityAPIView(APIView):
         schemes = list(GovernmentScheme.objects.all().values("title", "description", "details"))
         schemes_summary = "\n\n".join([f"Scheme: {s['title']}\nDesc: {s['description']}\nDetails: {s['details'][:300]}" for s in schemes])
 
-        prompt = f"""You are an expert Indian Government Scheme eligibility evaluator.
+        prompt = f"""You are an expert Indian Government scheme eligibility evaluator.
 Evaluate the following citizen profile against all registered government schemes below:
 
 CITIZEN PROFILE:
@@ -454,59 +444,135 @@ JSON Array schema per item:
 class TextToSpeechAPIView(APIView):
     """
     POST /api/tts/
-    Synthesizes text into high-quality neural MP3 audio stream using edge-tts with gTTS fallback.
+    Synthesizes clean text into audio bytes using Edge-TTS or Sarvam AI bulbul TTS engine.
+    Supports voice_id / gender selection ('female' / 'male') and regional voice maps.
+    Requires JWT auth to prevent quota abuse on paid TTS providers.
     """
-    permission_classes = (AllowAny,)
-    authentication_classes = ()
+    permission_classes = (IsAuthenticated,)
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'tts'
 
     def post(self, request, format=None):
-        import edge_tts
+        import re
         import io
-        from gtts import gTTS
+        import edge_tts
+        try:
+            from gtts import gTTS
+        except ImportError:
+            gTTS = None
         from asgiref.sync import async_to_sync
         from django.http import HttpResponse
+        from django.conf import settings
 
         text = request.data.get("text", "").strip()
         language = request.data.get("language", "en").lower().strip()
+        gender = request.data.get("gender", "").lower().strip()
+        voice_id = request.data.get("voice_id", "").lower().strip() or gender
+        provider = request.data.get("provider", "edge").lower().strip()
+        speech_rate = request.data.get("rate", "-4%").strip()
 
         if not text:
             return Response({"error": "Text is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Sanitize text for TTS
-        import re
-        clean_text = re.sub(r'https?://\S+', '', text)
-        clean_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', clean_text)
-        clean_text = re.sub(r'[*_~`#|]', '', clean_text).strip()
+        # Deep text sanitization for audio playback
+        clean_text = re.sub(r'https?://\S+', '', text)                                # Remove URLs
+        clean_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', clean_text)             # Remove markdown link syntax
+        clean_text = re.sub(r'#{1,6}\s*', '', clean_text)                             # Remove markdown headers
+        clean_text = re.sub(r'[*_~`|]', '', clean_text)                               # Remove markdown emphasis
+        clean_text = re.sub(r'^[\s\-\*]+\s*', '', clean_text, flags=re.MULTILINE)     # Remove bullet symbols
+        clean_text = re.sub(r'₹\s*([\d,]+)', r'\1 rupees', clean_text)                # Format currency
+        clean_text = re.sub(r'%', ' percent', clean_text)                            # Format percentage
+        clean_text = re.sub(r'\s+', ' ', clean_text).strip()                          # Collapse whitespace
+
         if not clean_text:
             clean_text = "Here is the information you requested."
 
-        voice_id = request.data.get("voice_id", "").lower().strip()
+        # Attempt Sarvam AI bulbul:v1 TTS if requested and key present
+        sarvam_key = getattr(settings, 'SARVAM_API_KEY', '') or getattr(settings, 'SARVAM_KEY', '')
+        if provider == "sarvam" and sarvam_key:
+            try:
+                import requests
+                SARVAM_VOICE_MAP = {
+                    "hi": "meera" if voice_id not in ["male", "madhur", "arvind"] else "arvind",
+                    "ta": "kavya" if voice_id not in ["male", "valluvar"] else "valluvar",
+                    "te": "shruti" if voice_id not in ["male", "mohan"] else "mohan",
+                    "kn": "sapna" if voice_id not in ["male", "gagan"] else "gagan",
+                    "mr": "aarohi" if voice_id not in ["male", "manohar"] else "manohar",
+                    "bn": "tanishaa" if voice_id not in ["male", "amartya"] else "amartya",
+                    "gu": "dhwani" if voice_id not in ["male", "niranjan"] else "niranjan",
+                    "ml": "sobhana" if voice_id not in ["male", "midhun"] else "midhun",
+                    "en": "meera",
+                }
+                s_voice = SARVAM_VOICE_MAP.get(language, "meera")
+                
+                resp = requests.post(
+                    "https://api.sarvam.ai/text-to-speech",
+                    headers={"api-subscription-key": sarvam_key, "Content-Type": "application/json"},
+                    json={
+                        "inputs": [clean_text[:500]],
+                        "target_language_code": f"{language}-IN" if len(language) == 2 else language,
+                        "speaker": s_voice,
+                        "pitch": 0,
+                        "pace": 1.0,
+                        "loudness": 1.5,
+                        "speech_sample_rate": 22050,
+                        "enable_preprocessing": True,
+                        "model": "bulbul:v1"
+                    },
+                    timeout=8.0
+                )
+                if resp.status_code == 200:
+                    import base64
+                    audios = resp.json().get("audios", [])
+                    if audios:
+                        audio_bytes = base64.b64decode(audios[0])
+                        response = HttpResponse(audio_bytes, content_type="audio/wav")
+                        response["Content-Disposition"] = 'inline; filename="speech.wav"'
+                        response["Access-Control-Allow-Origin"] = "*"
+                        print(f"[TTS API] Sarvam bulbul success: voice={s_voice}, bytes={len(audio_bytes)}")
+                        return response
+            except Exception as sarvam_err:
+                print(f"[TTS API] Sarvam TTS fallback to Edge-TTS: {sarvam_err}")
 
-        # Map language code & voice_id to ChatGPT & Regional Indian Neural Voices
-        VOICE_MAP = {
-            "en": "en-US-ChristopherNeural",            # Onyx smooth voice
-            "en-in": "en-IN-PrabhatNeural",             # Warm Indian male neural voice
-            "hi": "hi-IN-MadhurNeural",                 # Hindi male neural voice
-            "kn": "kn-IN-GaganNeural",                  # Kannada male neural voice
-            "ta": "ta-IN-ValluvarNeural",               # Tamil male neural voice
-            "te": "te-IN-MohanNeural",                  # Telugu male neural voice
-            "mr": "mr-IN-ManoharNeural",                # Marathi male neural voice
-            "bn": "bn-IN-BashkarNeural",                # Bengali male neural voice
-            "gu": "gu-IN-NiranjanNeural",               # Gujarati male neural voice
-            "ml": "ml-IN-MidhunNeural",                 # Malayalam male neural voice
-            "pa": "hi-IN-MadhurNeural",                 # Punjabi neural voice
-            "auto": "en-US-ChristopherNeural",
+        # Premium Warm Indian Neural Voice Models (Microsoft Edge-TTS)
+        FEMALE_VOICE_MAP = {
+            "en":    "en-IN-NeerjaNeural",
+            "en-in": "en-IN-NeerjaNeural",
+            "hi":    "hi-IN-SwaraNeural",
+            "kn":    "kn-IN-SapnaNeural",
+            "ta":    "ta-IN-PallaviNeural",
+            "te":    "te-IN-ShrutiNeural",
+            "mr":    "mr-IN-AarohiNeural",
+            "bn":    "bn-IN-TanishaaNeural",
+            "gu":    "gu-IN-DhwaniNeural",
+            "ml":    "ml-IN-SobhanaNeural",
+            "pa":    "hi-IN-SwaraNeural",
+            "ur":    "ur-IN-GulNeural",
+            "auto":  "en-IN-NeerjaNeural",
         }
 
-        if voice_id in ["sky", "breeze", "female"]:
-            chosen_voice = "en-US-AvaMultilingualNeural"
-        elif voice_id in ["onyx", "cove", "male"]:
-            chosen_voice = "en-US-ChristopherNeural"
+        MALE_VOICE_MAP = {
+            "en":    "en-IN-PrabhatNeural",
+            "en-in": "en-IN-PrabhatNeural",
+            "hi":    "hi-IN-MadhurNeural",
+            "kn":    "kn-IN-GaganNeural",
+            "ta":    "ta-IN-ValluvarNeural",
+            "te":    "te-IN-MohanNeural",
+            "mr":    "mr-IN-ManoharNeural",
+            "bn":    "bn-IN-BashkarNeural",
+            "gu":    "gu-IN-NiranjanNeural",
+            "ml":    "ml-IN-MidhunNeural",
+            "ur":    "ur-IN-SalmanNeural",
+            "auto":  "en-IN-PrabhatNeural",
+        }
+
+        if voice_id in ["male", "madhur", "prabhat", "gagan", "valluvar", "mohan", "manohar"]:
+            chosen_voice = MALE_VOICE_MAP.get(language, MALE_VOICE_MAP.get("en"))
         else:
-            chosen_voice = VOICE_MAP.get(language, "en-US-ChristopherNeural")
+            chosen_voice = FEMALE_VOICE_MAP.get(language, FEMALE_VOICE_MAP.get("en"))
 
         async def generate_edge_mp3():
-            communicate = edge_tts.Communicate(clean_text, chosen_voice, rate="+6%", pitch="+0Hz")
+            communicate = edge_tts.Communicate(clean_text, chosen_voice, rate=speech_rate, pitch="+0Hz")
             mp3_data = bytearray()
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
@@ -516,17 +582,21 @@ class TextToSpeechAPIView(APIView):
         try:
             try:
                 audio_bytes = async_to_sync(generate_edge_mp3)()
-                print(f"[TTS API] Edge-TTS success: {len(audio_bytes)} bytes for '{clean_text[:30]}'")
+                print(f"[TTS API] Edge-TTS success: voice={chosen_voice}, bytes={len(audio_bytes)} for '{clean_text[:30]}'")
             except Exception as edge_err:
-                print(f"[TTS API] Edge-TTS error ({edge_err}), using fallback gTTS...")
-                gtts_lang = language if language in ['hi', 'kn', 'ta', 'te', 'mr', 'bn', 'gu'] else 'en'
-                tts = gTTS(text=clean_text, lang=gtts_lang)
-                fp = io.BytesIO()
-                tts.write_to_fp(fp)
-                audio_bytes = fp.getvalue()
+                print(f"[TTS API] Edge-TTS error ({edge_err}), attempting fallback gTTS...")
+                if gTTS is not None:
+                    gtts_lang = language if language in ['hi', 'kn', 'ta', 'te', 'mr', 'bn', 'gu', 'ml'] else 'en'
+                    tts = gTTS(text=clean_text, lang=gtts_lang)
+                    fp = io.BytesIO()
+                    tts.write_to_fp(fp)
+                    audio_bytes = fp.getvalue()
+                else:
+                    raise edge_err
 
             response = HttpResponse(audio_bytes, content_type="audio/mpeg")
             response["Content-Disposition"] = 'inline; filename="speech.mp3"'
+            response["Access-Control-Allow-Origin"] = "*"
             return response
         except Exception as e:
             print(f"[TTS API] Synthesis Fatal Error: {e}")
@@ -545,3 +615,247 @@ class PingView(APIView):
 
     def get(self, request):
         return Response({"ok": True, "status": "alive"}, status=status.HTTP_200_OK)
+
+
+class GroqSTTView(APIView):
+    """
+    POST /api/stt/groq/
+    Receives a WebM audio blob from the browser MediaRecorder and transcribes
+    it using Groq's Whisper Large V3 model — supporting ALL 10 regional Indian languages.
+    Requires JWT auth to prevent quota abuse on the Whisper transcription API.
+    """
+    permission_classes = (IsAuthenticated,)
+    parser_classes = (MultiPartParser, FormParser)
+
+    # Supports ALL 10 regional languages natively for free
+    GROQ_SUPPORTED_LANGS = {'en', 'hi', 'mr', 'kn', 'ta', 'te', 'bn', 'gu', 'ml', 'pa', 'auto'}
+
+    def post(self, request, format=None):
+        import io
+        from django.conf import settings
+
+        audio_file = request.FILES.get('audio')
+        language   = request.data.get('lang', 'en').lower().strip()
+
+        if not audio_file:
+            return Response({'error': 'No audio file provided.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if language not in self.GROQ_SUPPORTED_LANGS:
+            return Response({'text': '', 'source': 'not_supported'}, status=status.HTTP_200_OK)
+
+        try:
+            from groq import Groq
+            client = Groq(api_key=settings.GROQ_API_KEY, timeout=20.0)
+
+            audio_bytes = audio_file.read()
+            if len(audio_bytes) < 500:
+                return Response({'text': '', 'source': 'too_short'}, status=status.HTTP_200_OK)
+
+            ext = 'webm'
+            fname = getattr(audio_file, 'name', '') or ''
+            ctype = getattr(audio_file, 'content_type', '') or ''
+            if 'mp4' in ctype or 'mp4' in fname or 'm4a' in fname or 'aac' in ctype:
+                ext = 'm4a'
+            elif 'wav' in ctype or 'wav' in fname:
+                ext = 'wav'
+            elif 'ogg' in ctype or 'ogg' in fname:
+                ext = 'ogg'
+            elif 'mp3' in ctype or 'mp3' in fname:
+                ext = 'mp3'
+
+            audio_io = io.BytesIO(audio_bytes)
+            audio_io.name = f'recording.{ext}'
+
+            WHISPER_LANG_MAP = {
+                'en':   'en',
+                'hi':   'hi',
+                'mr':   'mr',
+                'kn':   'kn',
+                'ta':   'ta',
+                'te':   'te',
+                'bn':   'bn',
+                'gu':   'gu',
+                'ml':   'ml',
+                'pa':   'pa',
+                'auto': None,
+            }
+            whisper_lang = WHISPER_LANG_MAP.get(language)
+
+            DOMAIN_PROMPT = (
+                "Indian Government scheme inquiry. Terms: PM Kisan Samman Nidhi, Ayushman Bharat, "
+                "PMJAY, ration card, BPL card, APL card, Aadhaar link, Ujjwala Yojana, E-Shram, "
+                "Kisan Credit Card, MGNREGA, Ladli Behna, Gruha Lakshmi, Anna Bhagya, "
+                "eligibility, application status, subsidy, pension, scheme apply, "
+                "ಪಿಎಂ ಕಿಸಾನ್, ರೇಷನ್ ಕಾರ್ಡ್, ಆಯುಷ್ಮಾನ್ ಭಾರತ್, ಅರ್ಹತೆ, ಯೋಚನೆ, "
+                "पीएम किसान, राशन कार्ड, आयुष्मान भारत, पात्रता, योजना."
+            )
+
+            try:
+                result = client.audio.transcriptions.create(
+                    file=audio_io,
+                    model='whisper-large-v3-turbo',
+                    prompt=DOMAIN_PROMPT,
+                    response_format='json',
+                    temperature=0.0,
+                    **( {'language': whisper_lang} if whisper_lang else {} )
+                )
+            except Exception as turbo_err:
+                console_msg = f"[Groq STT] Turbo model fallback due to: {turbo_err}"
+                print(console_msg)
+                audio_io.seek(0)
+                result = client.audio.transcriptions.create(
+                    file=audio_io,
+                    model='whisper-large-v3',
+                    prompt=DOMAIN_PROMPT,
+                    response_format='json',
+                    temperature=0.0,
+                    **( {'language': whisper_lang} if whisper_lang else {} )
+                )
+            transcript = (result.text or '').strip()
+
+            print(f"[Groq STT] lang={language} → '{transcript[:80]}'")
+            return Response({'text': transcript, 'source': 'groq'}, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            print(f"[Groq STT] Error: {e}")
+            return Response({'text': '', 'source': 'error', 'detail': str(e)}, status=status.HTTP_200_OK)
+
+
+class GeminiLiveConfigView(APIView):
+    """
+    GET /api/voice/live-config/
+    Returns configuration & tool definitions for Gemini 2.0 Multimodal Live Voice-to-Voice API.
+    Requires JWT auth + throttle to prevent the Gemini API key leaking to anonymous clients.
+    """
+    permission_classes = (IsAuthenticated,)
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'tts'
+
+    def get(self, request):
+        from django.conf import settings
+        gemini_key = getattr(settings, 'GEMINI_API_KEY', '')
+        live_model = getattr(settings, 'GEMINI_LIVE_MODEL', 'gemini-2.5-flash-native-audio-latest')
+        return Response({
+            "live_enabled": bool(gemini_key),
+            "api_key": gemini_key,
+            "model": live_model,
+            "system_instruction": (
+                "You are JanSeva AI, an ultra-fast, conversational Indian Government Scheme Voice Companion. "
+                "Emulate ChatGPT's Advanced Voice Mode: be warm, human, punchy, and clear in spoken dialogue.\n"
+                "CONVERSATIONAL VOICE RULES:\n"
+                "1. NO META-THOUGHTS: NEVER speak or output internal reasoning, planning steps, tool status, or self-explanations (e.g. NEVER say 'Initiating Search', 'Completing Ayushman Bharat', 'I've begun searching', 'I was cut off', or 'I want to continue'). Speak ONLY the final answer meant for the human listener.\n"
+                "2. PURE SINGLE LANGUAGE: Speak strictly in ONE primary language matching the user's spoken input. Do NOT blend multiple languages or code-switch within the same sentence.\n"
+                "3. CLEAR PACED CADENCE: Speak at a warm, clear, comfortable human conversational pace. Do NOT rush or slur words.\n"
+                "4. Keep responses brief and clear (2 to 3 short sentences, 20 to 35 words max).\n"
+                "5. CRITICAL TOOL USAGE: For any question about government scheme rules, eligibility, or benefits, "
+                "invoke the 'search_government_schemes' tool first to retrieve verified facts before speaking your answer."
+            )
+        }, status=status.HTTP_200_OK)
+
+
+class SearchSchemesToolView(APIView):
+    """
+    POST /api/voice/tool-search/
+    Ultra-low latency (< 50ms) tool execution endpoint for Gemini 2.5 Live session.
+    Requires JWT auth.
+    """
+    permission_classes = (IsAuthenticated,)
+
+    def post(self, request):
+        query = request.data.get("query", "").strip()
+        state = request.data.get("state", "").strip()
+        if not query:
+            return Response({"error": "Query required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        from .rag_pipeline import get_fast_scheme_facts
+        facts = get_fast_scheme_facts(query, state)
+        return Response({
+            "facts": facts,
+            "source": "fast_db_vector"
+        }, status=status.HTTP_200_OK)
+
+
+class TrendingSchemesView(APIView):
+    """
+    GET /api/trending-schemes/
+    Returns real-time newly announced government schemes, fetching live web announcements 
+    and automatically mapping category-matching background images.
+    """
+    permission_classes = (AllowAny,)
+    authentication_classes = ()
+
+    def get(self, request):
+        from django.core.cache import cache
+        cached_data = cache.get("live_trending_schemes_2026")
+        if cached_data:
+            return Response(cached_data, status=status.HTTP_200_OK)
+
+        # Scrape or fetch latest 2026 announced government schemes via live search
+        live_schemes = []
+        try:
+            from duckduckgo_search import DDGS
+            with DDGS() as ddgs:
+                results = list(ddgs.text("newly launched central government schemes 2026 india pib mygov", max_results=6))
+                for r in results:
+                    title = r.get("title", "").split("-")[0].strip()
+                    desc = r.get("body", "").strip()
+                    if title and len(desc) > 20 and not any(x in title.lower() for x in ["top 10", "list of", "pdf", "upsc"]):
+                        live_schemes.append({
+                            "title": title[:55],
+                            "subtitle": "Newly Announced Central Scheme 2026",
+                            "desc": desc[:130] + "...",
+                            "prompt": f"Tell me full eligibility, benefits, and application deadline for {title}",
+                        })
+        except Exception as e:
+            print(f"[TrendingSchemesView] Live search exception: {e}")
+
+        fallback_schemes = [
+            {
+                "title": "PM Surya Ghar: Muft Bijli Yojana",
+                "subtitle": "300 Units Free Electricity + ₹78,000 Subsidy",
+                "desc": "Get rooftop solar panels installed on your home with 60% central government subsidy.",
+                "prompt": "How to apply for PM Surya Ghar Muft Bijli Yojana solar rooftop subsidy and eligibility?",
+            },
+            {
+                "title": "PM Vishwakarma Yojana",
+                "subtitle": "₹3 Lakh Loan @ 5% + ₹15,000 Toolkit Voucher",
+                "desc": "Financial support, advanced skill training, and modern tools for traditional artisans & craftspeople.",
+                "prompt": "Who qualifies for PM Vishwakarma scheme and how to claim ₹15,000 toolkit voucher?",
+            },
+            {
+                "title": "Lakhpati Didi Scheme",
+                "subtitle": "Micro-Credit & Skill Training for Women",
+                "desc": "Entrepreneurship training in LED bulb manufacturing, drone operation, and tailoring for SHG women.",
+                "prompt": "How rural SHG women can join Lakhpati Didi scheme to start a small business?",
+            },
+            {
+                "title": "PM-PRANAM Scheme",
+                "subtitle": "Bio-Fertilizers & Soil Health Grants",
+                "desc": "State government incentive grants for farmers adopting organic and sustainable agriculture.",
+                "prompt": "What are the benefits and application process for PM PRANAM organic farming subsidy?",
+            },
+        ]
+
+        schemes_to_process = live_schemes[:4] if len(live_schemes) >= 3 else fallback_schemes
+
+        # Auto-map category background images based on title and description keywords
+        processed_schemes = []
+        for s in schemes_to_process:
+            text_corpus = (s["title"] + " " + s["desc"] + " " + s["subtitle"]).lower()
+            if any(k in text_corpus for k in ["solar", "power", "bijli", "roof", "energy", "awas"]):
+                bg = "/solar_bg.png"
+            elif any(k in text_corpus for k in ["kisan", "farm", "crop", "krishi", "soil", "fertilizer", "pranam", "agro"]):
+                bg = "/agriculture_bg.png"
+            elif any(k in text_corpus for k in ["health", "hospital", "ayushman", "medical", "insurance", "card", "doctor"]):
+                bg = "/healthcare_bg.png"
+            elif any(k in text_corpus for k in ["scholarship", "student", "school", "artisan", "skill", "vishwakarma", "women", "didi", "shg"]):
+                bg = "/education_bg.png"
+            else:
+                bg = "/solar_bg.png"
+            
+            s["bgImg"] = bg
+            processed_schemes.append(s)
+
+        # Cache for 1 hour to ensure fast loads
+        cache.set("live_trending_schemes_2026", processed_schemes, 3600)
+        return Response(processed_schemes, status=status.HTTP_200_OK)

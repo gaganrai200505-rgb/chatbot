@@ -10,8 +10,9 @@ from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
     ChatAPIView, RegisterView, LogoutView, ThrottledTokenObtainPairView,
     ChatHistoryView, SessionDetailAPIView, CheckEligibilityAPIView,
-    TextToSpeechAPIView, PingView,
+    TextToSpeechAPIView, PingView, GroqSTTView,
     VerifyOTPView, ResendOTPView, ForgotPasswordView, ResetPasswordView,
+    GeminiLiveConfigView, SearchSchemesToolView, TrendingSchemesView,
 )
 
 urlpatterns = [
@@ -32,6 +33,19 @@ urlpatterns = [
     path("check-eligibility/", CheckEligibilityAPIView.as_view(), name="check_eligibility"),
     path("tts/", TextToSpeechAPIView.as_view(), name="tts_api"),
 
+    # Dynamic Live Schemes Feed
+    path("trending-schemes/", TrendingSchemesView.as_view(), name="trending_schemes"),
+
     # Health check — keeps Render free-tier server alive (pinged every 10 min)
     path("ping/", PingView.as_view(), name="ping"),
+
+    # Groq Whisper STT — high-accuracy transcription for en / hi / mr
+    path("stt/groq/", GroqSTTView.as_view(), name="groq_stt"),
+
+    # Direct Gemini 2.0 Multimodal Live Voice-to-Voice endpoints
+    path("voice/live-config/", GeminiLiveConfigView.as_view(), name="gemini_live_config"),
+    path("voice/tool-search/", SearchSchemesToolView.as_view(), name="search_schemes_tool"),
 ]
+
+
+
