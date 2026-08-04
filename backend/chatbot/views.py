@@ -859,5 +859,22 @@ class TrendingSchemesView(APIView):
             processed_schemes.append(s)
 
         # Cache for 1 hour to ensure fast loads
-        cache.set("live_trending_schemes_2026", processed_schemes, 3600)
+        cache.set(cache_key, processed_schemes, 3600)
         return Response(processed_schemes, status=status.HTTP_200_OK)
+
+
+from django.views.decorators.csrf import csrf_exempt
+from django.http import HttpResponse
+
+@csrf_exempt
+def ivr_incoming_handler(request):
+    """
+    Exotel IVR Passthru Webhook Endpoint.
+    Returns HTTP 200 OK with XML instructions for Exotel.
+    """
+    response_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say language="en-IN">Welcome to JanSeva AI. You are connected to the live government scheme assistant.</Say>
+    <Hangup />
+</Response>"""
+    return HttpResponse(response_xml, content_type="application/xml; charset=utf-8", status=200)

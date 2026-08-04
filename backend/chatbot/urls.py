@@ -12,7 +12,7 @@ from .views import (
     ChatHistoryView, SessionDetailAPIView, CheckEligibilityAPIView,
     TextToSpeechAPIView, PingView, GroqSTTView,
     VerifyOTPView, ResendOTPView, ForgotPasswordView, ResetPasswordView,
-    GeminiLiveConfigView, SearchSchemesToolView, TrendingSchemesView,
+    GeminiLiveConfigView, SearchSchemesToolView, TrendingSchemesView, ivr_incoming_handler,
 )
 
 urlpatterns = [
@@ -45,6 +45,9 @@ urlpatterns = [
     # Direct Gemini 2.0 Multimodal Live Voice-to-Voice endpoints
     path("voice/live-config/", GeminiLiveConfigView.as_view(), name="gemini_live_config"),
     path("voice/tool-search/", SearchSchemesToolView.as_view(), name="search_schemes_tool"),
+
+    # Exotel IVR Phone Endpoint
+    path("ivr/incoming/", ivr_incoming_handler, name="ivr_incoming"),
 ]
 
 
