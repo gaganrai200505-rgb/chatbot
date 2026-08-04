@@ -869,12 +869,12 @@ from django.http import HttpResponse
 @csrf_exempt
 def ivr_incoming_handler(request):
     """
-    Exotel IVR Passthru Webhook Endpoint.
-    Returns HTTP 200 OK with XML instructions for Exotel.
+    Exotel IVR Webhook Endpoint for Phone Calls.
+    Greets caller and keeps the call active for speech interaction.
     """
     response_xml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say language="en-IN">Welcome to JanSeva AI. You are connected to the live government scheme assistant.</Say>
-    <Hangup />
+    <Say language="en-IN">Welcome to JanSeva AI, your Indian Government scheme assistant. Speak your scheme question after the tone.</Say>
+    <Record action="/api/ivr/incoming/" maxLength="12" finishOnKey="#" />
 </Response>"""
     return HttpResponse(response_xml, content_type="application/xml; charset=utf-8", status=200)
