@@ -29,9 +29,7 @@ class ChatbotConfig(AppConfig):
             admin_user.is_active = True
             admin_user.save()
 
-            # Remove any duplicate accounts with the same email except the primary 'admin' account
-            User.objects.filter(email__iexact=admin_email).exclude(username='admin').delete()
-            print(f"[AutoAdmin] Verified live superuser 'admin' with email '{admin_email}' & cleaned duplicate accounts ✓")
+            print(f"[AutoAdmin] Verified live superuser 'admin' with email '{admin_email}' ✓")
         except Exception as e:
             print(f"[AutoAdmin Warning] Could not auto-create admin on startup: {e}")
 

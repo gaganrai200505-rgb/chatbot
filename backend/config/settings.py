@@ -90,15 +90,34 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 
 # -------------------------------------------------------
-# Database (SQLite for development)
+# Database Configuration (Persistent Storage & PostgreSQL support)
 # -------------------------------------------------------
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
-        "CONN_MAX_AGE": 600,
+_db_env_url = os.getenv("DATABASE_URL", "").strip('"\'')
+if _db_env_url:
+    try:
+        import dj_database_url
+        DATABASES = {
+            "default": dj_database_url.parse(_db_env_url, conn_max_age=600)
+        }
+    except Exception as _db_err:
+        print(f"[Database Warning] Failed to parse DATABASE_URL: {_db_err}")
+        _custom_db_path = os.getenv("DATABASE_PATH", str(BASE_DIR / "db.sqlite3"))
+        DATABASES = {
+            "default": {
+                "ENGINE": "django.db.backends.sqlite3",
+                "NAME": _custom_db_path,
+                "CONN_MAX_AGE": 600,
+            }
+        }
+else:
+    _custom_db_path = os.getenv("DATABASE_PATH", str(BASE_DIR / "db.sqlite3"))
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": _custom_db_path,
+            "CONN_MAX_AGE": 600,
+        }
     }
-}
 
 # -------------------------------------------------------
 # CORS & CSRF Settings
